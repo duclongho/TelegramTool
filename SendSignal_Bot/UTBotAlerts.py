@@ -35,15 +35,21 @@ barbuy  = src > xATRTrailingStop
 barsell = src < xATRTrailingStop
 
 // --- THEO DÕI VỊ THẾ & SL/TP ---
-var float tp1_level = na
-var float tp2_level = na
-var float tp3_level = na
-var float sl_level  = na
-var int   trade_dir = 0
-var line  ln_tp1    = na
-var line  ln_tp2    = na
-var line  ln_tp3    = na
-var line  ln_sl     = na
+var float tp1_level  = na
+var float tp2_level  = na
+var float tp3_level  = na
+var float sl_level   = na
+var int   trade_dir  = 0
+var line  ln_tp1     = na
+var line  ln_tp2     = na
+var line  ln_tp3     = na
+var line  ln_sl      = na
+
+// Lưu riêng để dùng trong alert (không bị TP handler xóa)
+var float entry_tp1  = na
+var float entry_tp2  = na
+var float entry_tp3  = na
+var float entry_sl   = na
 
 // Lệnh mới luôn override lệnh cũ
 long_entry  = buy
@@ -63,6 +69,10 @@ if long_entry
     tp2_level := close + tp2_pts
     tp3_level := close + tp3_pts
     sl_level  := close - sl_pts
+    entry_tp1 := tp1_level
+    entry_tp2 := tp2_level
+    entry_tp3 := tp3_level
+    entry_sl  := sl_level
     ln_tp1 := line.new(bar_index, tp1_level, bar_index + 1, tp1_level, color=color.new(color.green, 60), width=1, extend=extend.right)
     ln_tp2 := line.new(bar_index, tp2_level, bar_index + 1, tp2_level, color=color.new(color.green, 30), width=1, extend=extend.right)
     ln_tp3 := line.new(bar_index, tp3_level, bar_index + 1, tp3_level, color=color.green,               width=2, extend=extend.right)
@@ -82,6 +92,10 @@ if short_entry
     tp2_level := close - tp2_pts
     tp3_level := close - tp3_pts
     sl_level  := close + sl_pts
+    entry_tp1 := tp1_level
+    entry_tp2 := tp2_level
+    entry_tp3 := tp3_level
+    entry_sl  := sl_level
     ln_tp1 := line.new(bar_index, tp1_level, bar_index + 1, tp1_level, color=color.new(color.green, 60), width=1, extend=extend.right)
     ln_tp2 := line.new(bar_index, tp2_level, bar_index + 1, tp2_level, color=color.new(color.green, 30), width=1, extend=extend.right)
     ln_tp3 := line.new(bar_index, tp3_level, bar_index + 1, tp3_level, color=color.green,               width=2, extend=extend.right)
@@ -171,10 +185,10 @@ _tf = timeframe.period
 _c  = str.tostring(close, "#.##")
 
 if long_entry
-    alert('{"signal":"UT Long","ticker":"' + _t + '","close":"' + _c + '","tp1":"' + str.tostring(tp1_level, "#.##") + '","tp2":"' + str.tostring(tp2_level, "#.##") + '","tp3":"' + str.tostring(tp3_level, "#.##") + '","sl":"' + str.tostring(sl_level, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar_close)
+    alert('{"signal":"UT Long","ticker":"' + _t + '","close":"' + _c + '","tp1":"' + str.tostring(entry_tp1, "#.##") + '","tp2":"' + str.tostring(entry_tp2, "#.##") + '","tp3":"' + str.tostring(entry_tp3, "#.##") + '","sl":"' + str.tostring(entry_sl, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar_close)
 
 if short_entry
-    alert('{"signal":"UT Short","ticker":"' + _t + '","close":"' + _c + '","tp1":"' + str.tostring(tp1_level, "#.##") + '","tp2":"' + str.tostring(tp2_level, "#.##") + '","tp3":"' + str.tostring(tp3_level, "#.##") + '","sl":"' + str.tostring(sl_level, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar_close)
+    alert('{"signal":"UT Short","ticker":"' + _t + '","close":"' + _c + '","tp1":"' + str.tostring(entry_tp1, "#.##") + '","tp2":"' + str.tostring(entry_tp2, "#.##") + '","tp3":"' + str.tostring(entry_tp3, "#.##") + '","sl":"' + str.tostring(entry_sl, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar_close)
 
 if long_tp1_hit
     alert('{"signal":"UT Long TP1","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar_close)

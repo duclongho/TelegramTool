@@ -153,6 +153,17 @@ def record_trade_close(data: dict):
     save_trades()
 
 
+# --- KIỂM TRA GIÁ HỢP LỆ (loại bỏ NaN / rỗng từ Pine Script) ---
+def _price(val) -> str | None:
+    if not val:
+        return None
+    try:
+        import math
+        return None if math.isnan(float(val)) else str(val)
+    except (ValueError, TypeError):
+        return None
+
+
 # --- CHUYỂN ĐỔI KHUNG THỜI GIAN ---
 def format_interval(tf: str) -> str:
     if tf.isdigit():
@@ -173,11 +184,11 @@ def format_message(data: dict) -> str:
     ticker    = data.get("ticker",    "N/A")
     close     = data.get("close",     "N/A")
     interval  = data.get("interval",  "N/A")
-    tp1       = data.get("tp1",       None)
-    tp2       = data.get("tp2",       None)
-    tp3       = data.get("tp3",       None)
-    sl        = data.get("sl",        None)
-    hit_price = data.get("hit_price", None)
+    tp1       = _price(data.get("tp1"))
+    tp2       = _price(data.get("tp2"))
+    tp3       = _price(data.get("tp3"))
+    sl        = _price(data.get("sl"))
+    hit_price = _price(data.get("hit_price"))
 
     sig_upper = signal.upper()
     if "LONG TP3" in sig_upper:
