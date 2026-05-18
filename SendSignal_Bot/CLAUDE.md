@@ -38,7 +38,8 @@ SendSignal_Bot/
 | `Mã_API` | `12345678` | Telegram API ID |
 | `Chuỗi_API` | `abc123...` | Telegram API Hash |
 | `Danh_Sách_ID_Nhận` | `-1001234567890, -1009876543210` | Chat ID các nhóm/kênh, phân cách bằng dấu phẩy |
-| `Port` | `5000` | Port Flask lắng nghe webhook (tuỳ chọn, mặc định 5000) |
+| `Port` | `80` | Port Flask lắng nghe webhook — TradingView chỉ hỗ trợ port 80 và 443 |
+| `Token` | `abc123xyz` | Secret token bảo vệ webhook, điền vào cuối URL |
 
 > Lấy API ID & Hash tại: https://my.telegram.org/apps
 
@@ -61,7 +62,7 @@ nssm start SendSignalBot
 
 ### 2. Tạo Alert cho tín hiệu BUY
 - **Condition:** `UT Long`
-- **Webhook URL:** `http://<IP_VPS>:5000/webhook`
+- **Webhook URL:** `http://<IP_VPS>:5000/webhook/<Token_trong_Excel>`
 - **Message:**
 ```json
 {"signal":"UT Long","ticker":"{{ticker}}","close":"{{close}}","interval":"{{interval}}","exchange":"{{exchange}}"}
@@ -69,7 +70,7 @@ nssm start SendSignalBot
 
 ### 3. Tạo Alert cho tín hiệu SELL
 - **Condition:** `UT Short`
-- **Webhook URL:** `http://<IP_VPS>:5000/webhook`
+- **Webhook URL:** `http://<IP_VPS>:5000/webhook/<Token_trong_Excel>`
 - **Message:**
 ```json
 {"signal":"UT Short","ticker":"{{ticker}}","close":"{{close}}","interval":"{{interval}}","exchange":"{{exchange}}"}
@@ -97,12 +98,12 @@ nssm start SendSignalBot
 
 | Endpoint | Method | Mô tả |
 |----------|--------|-------|
-| `/webhook` | POST | Nhận tín hiệu từ TradingView |
+| `/webhook/<token>` | POST | Nhận tín hiệu từ TradingView (yêu cầu đúng token) |
 | `/health` | GET | Kiểm tra bot còn sống không |
 
 ## Lưu ý
 
-- Mở port trên VPS Windows: vào **Windows Defender Firewall → Inbound Rules → New Rule → Port 5000**.
+- Mở port trên VPS Windows: vào **Windows Defender Firewall → Inbound Rules → New Rule → Port 80**.
 - File `signal_session.session` được tạo sau lần đăng nhập đầu tiên — không xoá, không commit.
 - `Data.xlsx` chứa thông tin nhạy cảm — không commit lên git.
 - TradingView gửi webhook theo múi giờ UTC; bot hiển thị giờ theo máy chủ.
