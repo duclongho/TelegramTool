@@ -2,6 +2,8 @@ import asyncio
 import threading
 import pandas as pd
 import sys
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
 import json
 import os
 from flask import Flask, request, jsonify

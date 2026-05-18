@@ -40,21 +40,52 @@ var float tp2_level = na
 var float tp3_level = na
 var float sl_level  = na
 var int   trade_dir = 0
+var line  ln_tp1    = na
+var line  ln_tp2    = na
+var line  ln_tp3    = na
+var line  ln_sl     = na
 
-// Chỉ vào lệnh mới khi không có lệnh nào đang chạy
-if buy and trade_dir == 0
+// Lệnh mới luôn override lệnh cũ
+long_entry  = buy
+short_entry = sell
+
+if long_entry
+    if not na(ln_tp1)
+        line.delete(ln_tp1)
+    if not na(ln_tp2)
+        line.delete(ln_tp2)
+    if not na(ln_tp3)
+        line.delete(ln_tp3)
+    if not na(ln_sl)
+        line.delete(ln_sl)
     trade_dir := 1
     tp1_level := close + tp1_pts
     tp2_level := close + tp2_pts
     tp3_level := close + tp3_pts
     sl_level  := close - sl_pts
+    ln_tp1 := line.new(bar_index, tp1_level, bar_index + 1, tp1_level, color=color.new(color.green, 60), width=1, extend=extend.right)
+    ln_tp2 := line.new(bar_index, tp2_level, bar_index + 1, tp2_level, color=color.new(color.green, 30), width=1, extend=extend.right)
+    ln_tp3 := line.new(bar_index, tp3_level, bar_index + 1, tp3_level, color=color.green,               width=2, extend=extend.right)
+    ln_sl  := line.new(bar_index, sl_level,  bar_index + 1, sl_level,  color=color.red,                 width=1, extend=extend.right)
 
-if sell and trade_dir == 0
+if short_entry
+    if not na(ln_tp1)
+        line.delete(ln_tp1)
+    if not na(ln_tp2)
+        line.delete(ln_tp2)
+    if not na(ln_tp3)
+        line.delete(ln_tp3)
+    if not na(ln_sl)
+        line.delete(ln_sl)
     trade_dir := -1
     tp1_level := close - tp1_pts
     tp2_level := close - tp2_pts
     tp3_level := close - tp3_pts
     sl_level  := close + sl_pts
+    ln_tp1 := line.new(bar_index, tp1_level, bar_index + 1, tp1_level, color=color.new(color.green, 60), width=1, extend=extend.right)
+    ln_tp2 := line.new(bar_index, tp2_level, bar_index + 1, tp2_level, color=color.new(color.green, 30), width=1, extend=extend.right)
+    ln_tp3 := line.new(bar_index, tp3_level, bar_index + 1, tp3_level, color=color.green,               width=2, extend=extend.right)
+    ln_sl  := line.new(bar_index, sl_level,  bar_index + 1, sl_level,  color=color.red,                 width=1, extend=extend.right)
 
 // Kiểm tra TP/SL bị chạm (ưu tiên TP cao nhất trước)
 long_tp3_hit  = trade_dir ==  1 and not na(tp3_level) and high >= tp3_level
@@ -67,34 +98,66 @@ short_tp2_hit = trade_dir == -1 and not na(tp2_level) and low  <= tp2_level and 
 short_tp1_hit = trade_dir == -1 and not na(tp1_level) and low  <= tp1_level and not short_tp2_hit and not short_tp3_hit
 short_sl_hit  = trade_dir == -1 and not na(sl_level)  and high >= sl_level
 
-// Lưu mức giá bị chạm trước khi reset
 var float hit_price = na
-if long_tp3_hit  or short_tp3_hit  => hit_price := tp3_level
-if long_tp2_hit  or short_tp2_hit  => hit_price := tp2_level
-if long_tp1_hit  or short_tp1_hit  => hit_price := tp1_level
-if long_sl_hit   or short_sl_hit   => hit_price := sl_level
 
-any_hit = long_tp1_hit or long_tp2_hit or long_tp3_hit or long_sl_hit or
-          short_tp1_hit or short_tp2_hit or short_tp3_hit or short_sl_hit
+// TP3 bị chạm: xóa TP1+TP2+TP3, lệnh vẫn sống chờ SL hoặc tín hiệu mới
+if long_tp3_hit or short_tp3_hit
+    hit_price := tp3_level
+    if not na(ln_tp1)
+        line.delete(ln_tp1)
+        ln_tp1    := na
+        tp1_level := na
+    if not na(ln_tp2)
+        line.delete(ln_tp2)
+        ln_tp2    := na
+        tp2_level := na
+    if not na(ln_tp3)
+        line.delete(ln_tp3)
+        ln_tp3    := na
+        tp3_level := na
 
-if any_hit
+// TP2 bị chạm: xóa TP1+TP2, TP3 vẫn hiển thị
+if long_tp2_hit or short_tp2_hit
+    hit_price := tp2_level
+    if not na(ln_tp1)
+        line.delete(ln_tp1)
+        ln_tp1    := na
+        tp1_level := na
+    if not na(ln_tp2)
+        line.delete(ln_tp2)
+        ln_tp2    := na
+        tp2_level := na
+
+// TP1 bị chạm: chỉ xóa TP1, TP2 và TP3 vẫn hiển thị
+if long_tp1_hit or short_tp1_hit
+    hit_price := tp1_level
+    if not na(ln_tp1)
+        line.delete(ln_tp1)
+        ln_tp1    := na
+        tp1_level := na
+
+// SL bị chạm: đóng lệnh hoàn toàn, xóa tất cả đường
+if long_sl_hit or short_sl_hit
+    hit_price := sl_level
     trade_dir := 0
     tp1_level := na
     tp2_level := na
     tp3_level := na
     sl_level  := na
+    if not na(ln_tp1)
+        line.delete(ln_tp1)
+        ln_tp1 := na
+    if not na(ln_tp2)
+        line.delete(ln_tp2)
+        ln_tp2 := na
+    if not na(ln_tp3)
+        line.delete(ln_tp3)
+        ln_tp3 := na
+    if not na(ln_sl)
+        line.delete(ln_sl)
+        ln_sl := na
 
 // --- HIỂN THỊ ---
-plot(trade_dir ==  1 ? tp1_level : na, title="Long TP1",  color=color.new(color.green, 60), style=plot.style_linebr, linewidth=1)
-plot(trade_dir ==  1 ? tp2_level : na, title="Long TP2",  color=color.new(color.green, 30), style=plot.style_linebr, linewidth=1)
-plot(trade_dir ==  1 ? tp3_level : na, title="Long TP3",  color=color.green,                style=plot.style_linebr, linewidth=2)
-plot(trade_dir ==  1 ? sl_level  : na, title="Long SL",   color=color.red,                  style=plot.style_linebr, linewidth=1)
-
-plot(trade_dir == -1 ? tp1_level : na, title="Short TP1", color=color.new(color.green, 60), style=plot.style_linebr, linewidth=1)
-plot(trade_dir == -1 ? tp2_level : na, title="Short TP2", color=color.new(color.green, 30), style=plot.style_linebr, linewidth=1)
-plot(trade_dir == -1 ? tp3_level : na, title="Short TP3", color=color.green,                style=plot.style_linebr, linewidth=2)
-plot(trade_dir == -1 ? sl_level  : na, title="Short SL",  color=color.red,                  style=plot.style_linebr, linewidth=1)
-
 plotshape(buy,  title="Buy",  text="Buy",  style=shape.labelup,   location=location.belowbar, color=color.green, textcolor=color.white, size=size.tiny)
 plotshape(sell, title="Sell", text="Sell", style=shape.labeldown, location=location.abovebar, color=color.red,   textcolor=color.white, size=size.tiny)
 
@@ -107,10 +170,10 @@ _ex = syminfo.prefix
 _tf = timeframe.period
 _c  = str.tostring(close, "#.##")
 
-if buy
+if long_entry
     alert('{"signal":"UT Long","ticker":"' + _t + '","close":"' + _c + '","tp1":"' + str.tostring(tp1_level, "#.##") + '","tp2":"' + str.tostring(tp2_level, "#.##") + '","tp3":"' + str.tostring(tp3_level, "#.##") + '","sl":"' + str.tostring(sl_level, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar_close)
 
-if sell
+if short_entry
     alert('{"signal":"UT Short","ticker":"' + _t + '","close":"' + _c + '","tp1":"' + str.tostring(tp1_level, "#.##") + '","tp2":"' + str.tostring(tp2_level, "#.##") + '","tp3":"' + str.tostring(tp3_level, "#.##") + '","sl":"' + str.tostring(sl_level, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar_close)
 
 if long_tp1_hit
