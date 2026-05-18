@@ -1,5 +1,5 @@
 //@version=6
-indicator(title="UT Bot Alerts", overlay=true)
+indicator(title="Rich Trading", overlay=true)
 
 // Inputs
 a       = input.int(1,      title="Key Value. 'This changes the sensitivity'")
@@ -51,9 +51,9 @@ var float entry_tp2  = na
 var float entry_tp3  = na
 var float entry_sl   = na
 
-// Lệnh mới luôn override lệnh cũ
-long_entry  = buy
-short_entry = sell
+// Vào lệnh mới khi: chưa có lệnh (trade_dir==0) HOẶC đã hit TP1 (tp1_level==na)
+long_entry  = buy  and (trade_dir == 0 or na(tp1_level))
+short_entry = sell and (trade_dir == 0 or na(tp1_level))
 
 if long_entry
     if not na(ln_tp1)
