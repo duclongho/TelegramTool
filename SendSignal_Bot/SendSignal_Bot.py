@@ -151,13 +151,26 @@ def record_trade_close(data: dict):
     save_trades()
 
 
+# --- CHUYỂN ĐỔI KHUNG THỜI GIAN ---
+def format_interval(tf: str) -> str:
+    if tf.isdigit():
+        minutes = int(tf)
+        if minutes < 60:
+            return f"{minutes}m"
+        elif minutes % 60 == 0:
+            return f"{minutes // 60}h"
+        else:
+            return f"{minutes}m"
+    mapping = {"D": "1D", "W": "1W", "M": "1M"}
+    return mapping.get(tf.upper(), tf)
+
+
 # --- ĐỊNH DẠNG TIN NHẮN TÍN HIỆU ---
 def format_message(data: dict) -> str:
     signal    = data.get("signal",    "")
     ticker    = data.get("ticker",    "N/A")
     close     = data.get("close",     "N/A")
     interval  = data.get("interval",  "N/A")
-    exchange  = data.get("exchange",  "N/A")
     tp1       = data.get("tp1",       None)
     tp2       = data.get("tp2",       None)
     tp3       = data.get("tp3",       None)
@@ -166,32 +179,33 @@ def format_message(data: dict) -> str:
 
     sig_upper = signal.upper()
     if "LONG TP3" in sig_upper:
-        icon, action = "💰", "LONG TP3 ✅✅✅"
+        icon, action = "💰", "BUY TP3 ✅✅✅"
     elif "LONG TP2" in sig_upper:
-        icon, action = "🎯", "LONG TP2 ✅✅"
+        icon, action = "🎯", "BUY TP2 ✅✅"
     elif "LONG TP1" in sig_upper:
-        icon, action = "✅", "LONG TP1 ✅"
+        icon, action = "✅", "BUY TP1 ✅"
     elif "LONG SL" in sig_upper:
-        icon, action = "🛑", "LONG SL ❌"
+        icon, action = "🛑", "BUY SL ❌"
     elif "SHORT TP3" in sig_upper:
-        icon, action = "💰", "SHORT TP3 ✅✅✅"
+        icon, action = "💰", "SELL TP3 ✅✅✅"
     elif "SHORT TP2" in sig_upper:
-        icon, action = "🎯", "SHORT TP2 ✅✅"
+        icon, action = "🎯", "SELL TP2 ✅✅"
     elif "SHORT TP1" in sig_upper:
-        icon, action = "✅", "SHORT TP1 ✅"
+        icon, action = "✅", "SELL TP1 ✅"
     elif "SHORT SL" in sig_upper:
-        icon, action = "🛑", "SHORT SL ❌"
+        icon, action = "🛑", "SELL SL ❌"
     elif "LONG" in sig_upper:
-        icon, action = "🟢", "LONG ▲"
+        icon, action = "🟢", "BUY  ▲"
     elif "SHORT" in sig_upper:
-        icon, action = "🔴", "SHORT ▼"
+        icon, action = "🔴", "SELL ▼"
     else:
         icon, action = "⚪", signal
 
     now   = datetime.now().strftime("%H:%M  %d/%m/%Y")
     lines = [
-        f"{icon} <b>UT {action}</b> | <b>{ticker}</b>",
-        f"📊 Sàn: {exchange}  |  ⏱ Khung: {interval}",
+        "<b>TÍN HIỆU RICH FOUNDATION</b>",
+        f"{icon} <b>{action}</b> | <b>{ticker}</b>",
+        f" ⏱ Khung: {format_interval(interval)}",
     ]
 
     if hit_price:
@@ -202,9 +216,9 @@ def format_message(data: dict) -> str:
         lines.append(f"💰 Giá chạm {label}: <b>{hit_price}</b>")
     else:
         lines.append(f"💰 Giá vào: <b>{close}</b>")
-        if tp1: lines.append(f"✅ TP1: {tp1}")
+        if tp1: lines.append(f"🎯 TP1: {tp1}")
         if tp2: lines.append(f"🎯 TP2: {tp2}")
-        if tp3: lines.append(f"💰 TP3: {tp3}")
+        if tp3: lines.append(f"🎯 TP3: {tp3}")
         if sl:  lines.append(f"🛑 SL:  {sl}")
 
     lines.append(f"🕐 {now}")
@@ -227,6 +241,7 @@ def format_daily_summary() -> str:
     net_sign     = "+" if net_pnl >= 0 else ""
 
     lines = [
+        "🔔 <b>RICH FOUNDATION</b> 🔔",
         f"📊 <b>TỔNG KẾT NGÀY {today}</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
         f"📥 Tổng lệnh vào: <b>{total}</b>",
@@ -249,8 +264,9 @@ def format_daily_summary() -> str:
             sign  = "+" if t["pnl"] >= 0 else ""
             t_in  = datetime.fromisoformat(t["entry_time"]).strftime("%H:%M")
             t_out = datetime.fromisoformat(t["exit_time"]).strftime("%H:%M") if t["exit_time"] else "?"
+            direction = "BUY" if t["direction"] == "LONG" else "SELL"
             lines.append(
-                f"{icon} {t['direction']} <b>{t['ticker']}</b>  "
+                f"{icon} {direction} <b>{t['ticker']}</b>  "
                 f"{sign}{t['pnl']:.2f}  |  {t_in}→{t_out}"
             )
 
@@ -258,8 +274,9 @@ def format_daily_summary() -> str:
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")
         lines.append("⏳ Lệnh chưa đóng:")
         for ticker, t in open_trades.items():
-            t_in = datetime.fromisoformat(t["entry_time"]).strftime("%H:%M")
-            lines.append(f"  {t['direction']} <b>{ticker}</b>  vào {t['entry_price']}  lúc {t_in}")
+            t_in      = datetime.fromisoformat(t["entry_time"]).strftime("%H:%M")
+            direction = "BUY" if t["direction"] == "LONG" else "SELL"
+            lines.append(f"  {direction} <b>{ticker}</b>  vào {t['entry_price']}  lúc {t_in}")
 
     return "\n".join(lines)
 
