@@ -273,7 +273,7 @@ def format_daily_summary() -> str:
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")
         lines.append("Chi tiết:")
         for t in closed_trades:
-            icon  = "✅" if t["result"] == "TP" else "❌"
+            icon  = "✅" if t["result"] in ("TP1", "TP2", "TP3") else "❌"
             sign  = "+" if t["pnl"] >= 0 else ""
             t_in  = datetime.fromisoformat(t["entry_time"]).strftime("%H:%M")
             t_out = datetime.fromisoformat(t["exit_time"]).strftime("%H:%M") if t["exit_time"] else "?"
