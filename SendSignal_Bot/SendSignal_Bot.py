@@ -54,6 +54,15 @@ def load_trades():
         print(f"⚠️ Không đọc được trades.json: {e}")
 
 
+def _parse_time(val) -> str:
+    """Chuyển giá trị time từ Excel (có thể là '08:00', '08:00:00', datetime.time...) về 'HH:MM'."""
+    import datetime as dt
+    if isinstance(val, (dt.time, dt.datetime)):
+        return f"{val.hour:02d}:{val.minute:02d}"
+    parts = str(val).strip().split(":")
+    return f"{int(parts[0]):02d}:{int(parts[1]):02d}"
+
+
 # --- CẤU HÌNH ---
 def load_config(file_path="Data.xlsx"):
     try:
@@ -65,7 +74,7 @@ def load_config(file_path="Data.xlsx"):
             "dest_ids":     dest_ids,
             "port":         int(df["Port"].iloc[0]) if "Port" in df.columns else 80,
             "token":        str(df["Token"].iloc[0]).strip(),
-            "summary_time": str(df["Giờ_Tổng_Kết"].iloc[0]).strip() if "Giờ_Tổng_Kết" in df.columns else "23:59",
+            "summary_time": _parse_time(df["Giờ_Tổng_Kết"].iloc[0]) if "Giờ_Tổng_Kết" in df.columns else "23:59",
         }
         return config
     except FileNotFoundError:

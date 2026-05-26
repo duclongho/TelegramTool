@@ -102,15 +102,16 @@ if short_entry
     ln_sl  := line.new(bar_index, sl_level,  bar_index + 1, sl_level,  color=color.red,                 width=1, extend=extend.right)
 
 // Kiểm tra TP/SL bị chạm (ưu tiên TP cao nhất trước)
-long_tp3_hit  = trade_dir ==  1 and not na(tp3_level) and high >= tp3_level
-long_tp2_hit  = trade_dir ==  1 and not na(tp2_level) and high >= tp2_level and not long_tp3_hit
-long_tp1_hit  = trade_dir ==  1 and not na(tp1_level) and high >= tp1_level and not long_tp2_hit and not long_tp3_hit
-long_sl_hit   = trade_dir ==  1 and not na(sl_level)  and low  <= sl_level
+// Không tính hit trên chính cây nến vào lệnh (low/high đó xảy ra trước khi entry tại close)
+long_tp3_hit  = trade_dir ==  1 and not na(tp3_level) and high >= tp3_level and not long_entry
+long_tp2_hit  = trade_dir ==  1 and not na(tp2_level) and high >= tp2_level and not long_tp3_hit and not long_entry
+long_tp1_hit  = trade_dir ==  1 and not na(tp1_level) and high >= tp1_level and not long_tp2_hit and not long_tp3_hit and not long_entry
+long_sl_hit   = trade_dir ==  1 and not na(sl_level)  and low  <= sl_level  and not long_entry
 
-short_tp3_hit = trade_dir == -1 and not na(tp3_level) and low  <= tp3_level
-short_tp2_hit = trade_dir == -1 and not na(tp2_level) and low  <= tp2_level and not short_tp3_hit
-short_tp1_hit = trade_dir == -1 and not na(tp1_level) and low  <= tp1_level and not short_tp2_hit and not short_tp3_hit
-short_sl_hit  = trade_dir == -1 and not na(sl_level)  and high >= sl_level
+short_tp3_hit = trade_dir == -1 and not na(tp3_level) and low  <= tp3_level and not short_entry
+short_tp2_hit = trade_dir == -1 and not na(tp2_level) and low  <= tp2_level and not short_tp3_hit and not short_entry
+short_tp1_hit = trade_dir == -1 and not na(tp1_level) and low  <= tp1_level and not short_tp2_hit and not short_tp3_hit and not short_entry
+short_sl_hit  = trade_dir == -1 and not na(sl_level)  and high >= sl_level  and not short_entry
 
 var float hit_price = na
 
@@ -142,13 +143,17 @@ if long_tp2_hit or short_tp2_hit
         ln_tp2    := na
         tp2_level := na
 
-// TP1 bị chạm: chỉ xóa TP1, TP2 và TP3 vẫn hiển thị
+// TP1 bị chạm: xóa TP1 và SL (đã có lãi, không báo SL nữa), TP2 và TP3 vẫn hiển thị
 if long_tp1_hit or short_tp1_hit
     hit_price := tp1_level
     if not na(ln_tp1)
         line.delete(ln_tp1)
         ln_tp1    := na
         tp1_level := na
+    if not na(ln_sl)
+        line.delete(ln_sl)
+        ln_sl    := na
+        sl_level := na
 
 // SL bị chạm: đóng lệnh hoàn toàn, xóa tất cả đường
 if long_sl_hit or short_sl_hit
