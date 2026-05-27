@@ -196,25 +196,25 @@ if short_entry
     alert('{"signal":"UT Short","ticker":"' + _t + '","close":"' + _c + '","tp1":"' + str.tostring(entry_tp1, "#.##") + '","tp2":"' + str.tostring(entry_tp2, "#.##") + '","tp3":"' + str.tostring(entry_tp3, "#.##") + '","sl":"' + str.tostring(entry_sl, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar_close)
 
 if long_tp1_hit
-    alert('{"signal":"UT Long TP1","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar_close)
+    alert('{"signal":"UT Long TP1","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar)
 
 if long_tp2_hit
-    alert('{"signal":"UT Long TP2","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar_close)
+    alert('{"signal":"UT Long TP2","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar)
 
 if long_tp3_hit
-    alert('{"signal":"UT Long TP3","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar_close)
+    alert('{"signal":"UT Long TP3","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar)
 
 if long_sl_hit
-    alert('{"signal":"UT Long SL","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar_close)
+    alert('{"signal":"UT Long SL","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar)
 
 if short_tp1_hit
-    alert('{"signal":"UT Short TP1","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar_close)
+    alert('{"signal":"UT Short TP1","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar)
 
 if short_tp2_hit
-    alert('{"signal":"UT Short TP2","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar_close)
+    alert('{"signal":"UT Short TP2","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar)
 
 if short_tp3_hit
-    alert('{"signal":"UT Short TP3","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar_close)
+    alert('{"signal":"UT Short TP3","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar)
 
 if short_sl_hit
-    alert('{"signal":"UT Short SL","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar_close)
+    alert('{"signal":"UT Short SL","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + str.tostring(hit_price, "#.##") + '","interval":"' + _tf + '","exchange":"' + _ex + '"}', alert.freq_once_per_bar)
