@@ -18,7 +18,8 @@ cfg           = None
 open_trades   = {}   # ticker -> trade dict (lệnh đang chạy)
 closed_trades = []   # list (lệnh đã đóng trong ngày)
 
-TRADES_FILE = "trades.json"
+TRADES_FILE    = "trades.json"
+YESTERDAY_FILE = "trades_yesterday.json"
 
 
 # --- LƯU / TẢI DỮ LIỆU ---
@@ -29,6 +30,16 @@ def save_trades():
         "closed_trades": closed_trades,
     }
     with open(TRADES_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, default=str)
+
+
+def save_yesterday():
+    """Lưu dữ liệu ngày hiện tại vào file hôm qua trước khi xoá."""
+    data = {
+        "date":          datetime.now().strftime("%Y-%m-%d"),
+        "closed_trades": list(closed_trades),
+    }
+    with open(YESTERDAY_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, default=str)
 
 
@@ -174,6 +185,24 @@ def record_trade_close(data: dict):
     save_trades()
 
 
+# --- CHUYỂN ĐỔI GIÁ → PIP ---
+def price_to_pips(ticker: str, price_diff: float) -> int:
+    """Chuyển chênh lệch giá thành pip dựa theo loại instrument (có dấu)."""
+    t = ticker.upper()
+    if "XAU" in t:                                        # Vàng: 1 pip = 0.1
+        pip_size = 0.1
+    elif "XAG" in t:                                      # Bạc: 1 pip = 0.001
+        pip_size = 0.001
+    elif "JPY" in t:                                      # Cặp JPY: 1 pip = 0.01
+        pip_size = 0.01
+    elif any(c in t for c in ["BTC", "ETH", "BNB", "SOL", "XRP"]):  # Crypto: 1 pip = 1
+        pip_size = 1.0
+    else:                                                 # Forex thường: 1 pip = 0.0001
+        pip_size = 0.0001
+    sign = 1 if price_diff >= 0 else -1
+    return int(round(abs(price_diff) / pip_size)) * sign
+
+
 # --- KIỂM TRA GIÁ HỢP LỆ (loại bỏ NaN / rỗng từ Pine Script) ---
 def _price(val) -> str | None:
     if not val:
@@ -259,61 +288,96 @@ def format_message(data: dict) -> str:
     return "\n".join(lines)
 
 
-# --- ĐỊNH DẠNG TIN NHẮN TỔNG KẾT ---
-def format_daily_summary() -> str:
-    today      = datetime.now().strftime("%d/%m/%Y")
-    total      = len(closed_trades) + len(open_trades)
-    wins       = sum(1 for t in closed_trades if t["result"] in ("TP1", "TP2", "TP3"))
-    losses     = sum(1 for t in closed_trades if t["result"] == "SL")
-    still_open = len(open_trades)
+# --- ĐỊNH DẠNG TIN NHẮN TỔNG KẾT (dùng chung) ---
+def _build_summary(title: str, trades: list, open_tds: dict | None = None) -> str:
+    wins       = sum(1 for t in trades if t["result"] in ("TP1", "TP2", "TP3"))
+    losses     = sum(1 for t in trades if t["result"] == "SL")
+    still_open = len(open_tds) if open_tds else 0
+    total      = len(trades) + still_open
 
-    total_profit = sum(t["pnl"] for t in closed_trades if t["pnl"] and t["pnl"] > 0)
-    total_loss   = sum(t["pnl"] for t in closed_trades if t["pnl"] and t["pnl"] < 0)
-    net_pnl      = total_profit + total_loss
-    win_rate     = f"{wins / len(closed_trades) * 100:.0f}%" if closed_trades else "—"
-    net_icon     = "📈" if net_pnl >= 0 else "📉"
-    net_sign     = "+" if net_pnl >= 0 else ""
+    pip_profit = sum(price_to_pips(t["ticker"], t["pnl"]) for t in trades if t.get("pnl") and t["pnl"] > 0)
+    pip_loss   = sum(price_to_pips(t["ticker"], t["pnl"]) for t in trades if t.get("pnl") and t["pnl"] < 0)
+    net_pips   = pip_profit + pip_loss
+    win_rate   = f"{wins / len(trades) * 100:.0f}%" if trades else "—"
+    net_icon   = "📈" if net_pips >= 0 else "📉"
+    net_sign   = "+" if net_pips >= 0 else ""
 
     lines = [
         "🔔 <b>RICH FOUNDATION</b> 🔔",
-        f"📊 <b>TỔNG KẾT NGÀY {today}</b>",
+        f"📊 <b>{title}</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        f"📥 Tổng lệnh vào: <b>{total}</b>",
+        f"📥 Tổng lệnh: <b>{total}</b>",
         f"✅ Thắng (TP): <b>{wins}</b>  |  ❌ Thua (SL): <b>{losses}</b>",
         f"📊 Tỉ lệ thắng: <b>{win_rate}</b>",
         "",
-        f"💰 Tổng lãi:  +{total_profit:.2f}",
-        f"📉 Tổng lỗ:   {total_loss:.2f}",
-        f"{net_icon} Net P&L: <b>{net_sign}{net_pnl:.2f}</b>",
+        f"💰 Tổng lãi:  +{pip_profit} pip",
+        f"📉 Tổng lỗ:   {pip_loss} pip",
+        f"{net_icon} Net P&L: <b>{net_sign}{net_pips} pip</b>",
     ]
 
     if still_open:
         lines.append(f"⏳ Đang mở: <b>{still_open}</b> lệnh (chưa tính)")
 
-    if closed_trades:
+    if trades:
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")
         lines.append("Chi tiết:")
-        for t in closed_trades:
-            icon  = "✅" if t["result"] in ("TP1", "TP2", "TP3") else "❌"
-            sign  = "+" if t["pnl"] >= 0 else ""
-            t_in  = datetime.fromisoformat(t["entry_time"]).strftime("%H:%M")
-            t_out = datetime.fromisoformat(t["exit_time"]).strftime("%H:%M") if t["exit_time"] else "?"
+        for t in trades:
+            icon      = "✅" if t["result"] in ("TP1", "TP2", "TP3") else "❌"
+            pips      = price_to_pips(t["ticker"], t["pnl"])
+            sign      = "+" if pips >= 0 else ""
+            t_in      = datetime.fromisoformat(t["entry_time"]).strftime("%H:%M")
+            t_out     = datetime.fromisoformat(t["exit_time"]).strftime("%H:%M") if t.get("exit_time") else "?"
             direction = "BUY" if t["direction"] == "LONG" else "SELL"
-            label = t["result"]
             lines.append(
-                f"{icon} {direction} <b>{t['ticker']}</b> [{label}]  "
-                f"{sign}{t['pnl']:.2f}  |  {t_in}→{t_out}"
+                f"{icon} {direction} <b>{t['ticker']}</b> [{t['result']}]  "
+                f"{sign}{pips} pip  |  {t_in}→{t_out}"
             )
 
-    if open_trades:
+    if open_tds:
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")
         lines.append("⏳ Lệnh chưa đóng:")
-        for ticker, t in open_trades.items():
+        for ticker, t in open_tds.items():
             t_in      = datetime.fromisoformat(t["entry_time"]).strftime("%H:%M")
             direction = "BUY" if t["direction"] == "LONG" else "SELL"
             lines.append(f"  {direction} <b>{ticker}</b>  vào {t['entry_price']}  lúc {t_in}")
 
     return "\n".join(lines)
+
+
+def format_daily_summary() -> str:
+    today = datetime.now().strftime("%d/%m/%Y")
+    return _build_summary(f"TỔNG KẾT NGÀY {today}", list(closed_trades), dict(open_trades))
+
+
+def format_morning_summary() -> str | None:
+    """Tổng kết ngày hôm qua — gửi đầu buổi sáng."""
+    if not os.path.exists(YESTERDAY_FILE):
+        return None
+    try:
+        with open(YESTERDAY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        trades = data.get("closed_trades", [])
+        raw_date = data.get("date", "")
+        try:
+            label_date = datetime.strptime(raw_date, "%Y-%m-%d").strftime("%d/%m/%Y")
+        except ValueError:
+            label_date = raw_date
+    except Exception:
+        return None
+    if not trades:
+        return None
+    return _build_summary(f"TỔNG KẾT NGÀY {label_date}", trades)
+
+
+def format_partial_summary(from_h: int, to_h: int, period_name: str) -> str:
+    """Tổng kết theo khung giờ trong ngày (lọc theo giờ đóng lệnh)."""
+    trades = [
+        t for t in closed_trades
+        if t.get("exit_time")
+        and from_h <= datetime.fromisoformat(t["exit_time"]).hour < to_h
+    ]
+    today = datetime.now().strftime("%d/%m/%Y")
+    return _build_summary(f"THỐNG KÊ {period_name} {today}", trades)
 
 
 # --- GỬI TỚI TẤT CẢ NHÓM ---
@@ -326,27 +390,64 @@ async def send_all(message: str):
             print(f"  ❌ Lỗi tại {chat_id}: {type(e).__name__} — {e}")
 
 
-# --- TÁC VỤ TỔNG KẾT HẰNG NGÀY ---
-async def daily_summary_task():
-    while True:
-        now  = datetime.now()
-        h, m = map(int, cfg["summary_time"].split(":"))
-        target = now.replace(hour=h, minute=m, second=0, microsecond=0)
-        if now >= target:
-            target += timedelta(days=1)
+# --- LỊCH GỬI THÔNG BÁO ---
+# (hour, minute, type, *args)
+#   "morning"  : tổng kết ngày hôm qua
+#   "partial"  : thống kê khung giờ — args = (from_h, to_h, period_name)
+#   "daily"    : tổng kết cuối ngày + reset dữ liệu
+# 3 giờ cố định trong ngày (không lấy từ Excel)
+_FIXED_SCHEDULE = [
+    (12, 0, "partial", 0,  12, "BUỔI SÁNG"),
+    (17, 0, "partial", 12, 17, "BUỔI CHIỀU"),
+    (22, 0, "partial", 17, 22, "BUỔI TỐI"),
+]
 
-        wait = (target - now).total_seconds()
-        print(f"📅 Tổng kết sẽ gửi lúc {cfg['summary_time']} (còn {wait / 3600:.1f}h)")
+
+async def notification_scheduler():
+    while True:
+        now = datetime.now()
+        h_m, m_m = map(int, cfg["summary_time"].split(":"))
+
+        # Giờ sáng lấy từ Excel (Giờ_Tổng_Kết); 3 giờ còn lại cố định
+        schedule = list(_FIXED_SCHEDULE) + [(h_m, m_m, "morning")]
+
+        # Tìm thông báo kế tiếp gần nhất
+        candidates = []
+        for item in schedule:
+            h, m = item[0], item[1]
+            target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            candidates.append((target, item))
+        candidates.sort(key=lambda x: x[0])
+
+        next_time, next_item = candidates[0]
+        ntype = next_item[2]
+        wait  = (next_time - now).total_seconds()
+        print(f"⏰ Thông báo tiếp theo: [{ntype}] lúc {next_time.strftime('%H:%M %d/%m')} (còn {wait / 3600:.1f}h)")
+
         await asyncio.sleep(wait)
 
-        print("\n📊 Đang gửi tổng kết ngày...")
-        await send_all(format_daily_summary())
+        if ntype == "morning":
+            # Lưu dữ liệu ngày hôm qua rồi gửi tổng kết, sau đó reset cho ngày mới
+            save_yesterday()
+            msg = format_morning_summary()
+            if msg:
+                print("\n🌅 Đang gửi tổng kết hôm qua...")
+                await send_all(msg)
+            else:
+                print("\n🌅 Không có dữ liệu hôm qua, bỏ qua.")
+            closed_trades.clear()
+            open_trades.clear()
+            if os.path.exists(TRADES_FILE):
+                os.remove(TRADES_FILE)
 
-        closed_trades.clear()
-        open_trades.clear()
-        if os.path.exists(TRADES_FILE):
-            os.remove(TRADES_FILE)
-        await asyncio.sleep(61)  # tránh gửi 2 lần trong cùng phút
+        elif ntype == "partial":
+            _, _, _, from_h, to_h, period_name = next_item
+            print(f"\n📊 Đang gửi thống kê {period_name}...")
+            await send_all(format_partial_summary(from_h, to_h, period_name))
+
+        await asyncio.sleep(61)  # tránh kích hoạt 2 lần trong cùng phút
 
 
 # --- WEBHOOK ENDPOINT ---
@@ -405,7 +506,7 @@ async def main():
     print(f"🎯 Đích: {len(cfg['dest_ids'])} nhóm/kênh")
     print(f"🌐 Webhook: http://0.0.0.0:{cfg['port']}/webhook/{cfg['token']}")
     print(f"❤️  Health:  http://0.0.0.0:{cfg['port']}/health")
-    print(f"📅 Tổng kết: {cfg['summary_time']} mỗi ngày")
+    print(f"📅 Lịch thông báo: {cfg['summary_time']} (hôm qua + reset) | 12:00 | 17:00 | 22:00")
     print("=" * 50 + "\n")
 
     threading.Thread(
@@ -413,7 +514,7 @@ async def main():
         daemon=True,
     ).start()
 
-    asyncio.ensure_future(daily_summary_task())
+    asyncio.ensure_future(notification_scheduler())
     await client.run_until_disconnected()
 
 
