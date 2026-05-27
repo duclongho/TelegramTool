@@ -102,15 +102,15 @@ if short_entry
     ln_sl  := line.new(bar_index, sl_level,  bar_index + 1, sl_level,  color=color.red,                 width=1, extend=extend.right)
 
 // Kiểm tra TP/SL bị chạm (ưu tiên TP cao nhất trước)
-// Không tính hit trên chính cây nến vào lệnh (low/high đó xảy ra trước khi entry tại close)
-long_tp3_hit  = trade_dir ==  1 and not na(tp3_level) and high >= tp3_level and not long_entry
-long_tp2_hit  = trade_dir ==  1 and not na(tp2_level) and high >= tp2_level and not long_tp3_hit and not long_entry
-long_tp1_hit  = trade_dir ==  1 and not na(tp1_level) and high >= tp1_level and not long_tp2_hit and not long_tp3_hit and not long_entry
+// Chỉ SL mới cần chặn trên cây nến vào lệnh (vì low của cây entry xảy ra trước khi vào lệnh tại close)
+long_tp3_hit  = trade_dir ==  1 and not na(tp3_level) and high >= tp3_level
+long_tp2_hit  = trade_dir ==  1 and not na(tp2_level) and high >= tp2_level and not long_tp3_hit
+long_tp1_hit  = trade_dir ==  1 and not na(tp1_level) and high >= tp1_level and not long_tp2_hit and not long_tp3_hit
 long_sl_hit   = trade_dir ==  1 and not na(sl_level)  and low  <= sl_level  and not long_entry
 
-short_tp3_hit = trade_dir == -1 and not na(tp3_level) and low  <= tp3_level and not short_entry
-short_tp2_hit = trade_dir == -1 and not na(tp2_level) and low  <= tp2_level and not short_tp3_hit and not short_entry
-short_tp1_hit = trade_dir == -1 and not na(tp1_level) and low  <= tp1_level and not short_tp2_hit and not short_tp3_hit and not short_entry
+short_tp3_hit = trade_dir == -1 and not na(tp3_level) and low  <= tp3_level
+short_tp2_hit = trade_dir == -1 and not na(tp2_level) and low  <= tp2_level and not short_tp3_hit
+short_tp1_hit = trade_dir == -1 and not na(tp1_level) and low  <= tp1_level and not short_tp2_hit and not short_tp3_hit
 short_sl_hit  = trade_dir == -1 and not na(sl_level)  and high >= sl_level  and not short_entry
 
 var float hit_price = na
@@ -177,8 +177,8 @@ if long_sl_hit or short_sl_hit
         ln_sl := na
 
 // --- HIỂN THỊ ---
-plotshape(buy,  title="Buy",  text="Buy",  style=shape.labelup,   location=location.belowbar, color=color.green, textcolor=color.white, size=size.tiny)
-plotshape(sell, title="Sell", text="Sell", style=shape.labeldown, location=location.abovebar, color=color.red,   textcolor=color.white, size=size.tiny)
+plotshape(long_entry,  title="Buy",  text="Buy",  style=shape.labelup,   location=location.belowbar, color=color.green, textcolor=color.white, size=size.tiny)
+plotshape(short_entry, title="Sell", text="Sell", style=shape.labeldown, location=location.abovebar, color=color.red,   textcolor=color.white, size=size.tiny)
 
 barcolor(barbuy  ? color.green : na)
 barcolor(barsell ? color.red   : na)

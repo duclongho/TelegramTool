@@ -139,14 +139,26 @@ def record_trade_close(data: dict):
     else:
         result = "SL"
 
-    trade = open_trades.pop(ticker, None)
-    if not trade:
-        return
-
     try:
         exit_price = float(data.get("hit_price", data.get("close", 0)))
     except (ValueError, TypeError):
         exit_price = 0.0
+
+    # TP2/TP3: cập nhật record TP trước đó thay vì tạo bản ghi mới
+    if result in ("TP2", "TP3"):
+        for t in reversed(closed_trades):
+            if t["ticker"] == ticker and t["result"] in ("TP1", "TP2"):
+                pnl = abs(exit_price - t["entry_price"])
+                t["exit_price"] = exit_price
+                t["exit_time"]  = datetime.now().isoformat()
+                t["result"]     = result
+                t["pnl"]        = round(pnl, 2)
+                save_trades()
+                return
+
+    trade = open_trades.pop(ticker, None)
+    if not trade:
+        return
 
     pnl = abs(exit_price - trade["entry_price"])
     if result == "SL":
@@ -287,8 +299,9 @@ def format_daily_summary() -> str:
             t_in  = datetime.fromisoformat(t["entry_time"]).strftime("%H:%M")
             t_out = datetime.fromisoformat(t["exit_time"]).strftime("%H:%M") if t["exit_time"] else "?"
             direction = "BUY" if t["direction"] == "LONG" else "SELL"
+            label = t["result"]
             lines.append(
-                f"{icon} {direction} <b>{t['ticker']}</b>  "
+                f"{icon} {direction} <b>{t['ticker']}</b> [{label}]  "
                 f"{sign}{t['pnl']:.2f}  |  {t_in}→{t_out}"
             )
 
