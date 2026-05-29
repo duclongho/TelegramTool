@@ -141,7 +141,11 @@ def record_trade_open(data: dict):
 def record_trade_close(data: dict):
     ticker    = data.get("ticker", "N/A")
     sig_upper = data.get("signal", "").upper()
-    if "TP3" in sig_upper:
+    if "TP5" in sig_upper:
+        result = "TP5"
+    elif "TP4" in sig_upper:
+        result = "TP4"
+    elif "TP3" in sig_upper:
         result = "TP3"
     elif "TP2" in sig_upper:
         result = "TP2"
@@ -155,10 +159,10 @@ def record_trade_close(data: dict):
     except (ValueError, TypeError):
         exit_price = 0.0
 
-    # TP2/TP3: cập nhật record TP trước đó thay vì tạo bản ghi mới
-    if result in ("TP2", "TP3"):
+    # TP2–TP5: cập nhật record TP trước đó thay vì tạo bản ghi mới
+    if result in ("TP2", "TP3", "TP4", "TP5"):
         for t in reversed(closed_trades):
-            if t["ticker"] == ticker and t["result"] in ("TP1", "TP2"):
+            if t["ticker"] == ticker and t["result"] in ("TP1", "TP2", "TP3", "TP4"):
                 pnl = abs(exit_price - t["entry_price"])
                 t["exit_price"] = exit_price
                 t["exit_time"]  = datetime.now().isoformat()
@@ -241,7 +245,11 @@ def format_message(data: dict) -> str:
     hit_price = _price(data.get("hit_price"))
 
     sig_upper = signal.upper()
-    if "LONG TP3" in sig_upper:
+    if "LONG TP5" in sig_upper:
+        icon, action = "🏆", "BUY TP5 ✅✅✅✅✅"
+    elif "LONG TP4" in sig_upper:
+        icon, action = "💎", "BUY TP4 ✅✅✅✅"
+    elif "LONG TP3" in sig_upper:
         icon, action = "💰", "BUY TP3 ✅✅✅"
     elif "LONG TP2" in sig_upper:
         icon, action = "🎯", "BUY TP2 ✅✅"
@@ -249,6 +257,10 @@ def format_message(data: dict) -> str:
         icon, action = "✅", "BUY TP1 ✅"
     elif "LONG SL" in sig_upper:
         icon, action = "🛑", "BUY SL ❌"
+    elif "SHORT TP5" in sig_upper:
+        icon, action = "🏆", "SELL TP5 ✅✅✅✅✅"
+    elif "SHORT TP4" in sig_upper:
+        icon, action = "💎", "SELL TP4 ✅✅✅✅"
     elif "SHORT TP3" in sig_upper:
         icon, action = "💰", "SELL TP3 ✅✅✅"
     elif "SHORT TP2" in sig_upper:
@@ -290,7 +302,7 @@ def format_message(data: dict) -> str:
 
 # --- ĐỊNH DẠNG TIN NHẮN TỔNG KẾT (dùng chung) ---
 def _build_summary(title: str, trades: list, open_tds: dict | None = None) -> str:
-    wins       = sum(1 for t in trades if t["result"] in ("TP1", "TP2", "TP3"))
+    wins       = sum(1 for t in trades if t["result"] in ("TP1", "TP2", "TP3", "TP4", "TP5"))
     losses     = sum(1 for t in trades if t["result"] == "SL")
     still_open = len(open_tds) if open_tds else 0
     total      = len(trades) + still_open
@@ -322,7 +334,7 @@ def _build_summary(title: str, trades: list, open_tds: dict | None = None) -> st
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")
         lines.append("Chi tiết:")
         for t in trades:
-            icon      = "✅" if t["result"] in ("TP1", "TP2", "TP3") else "❌"
+            icon      = "✅" if t["result"] in ("TP1", "TP2", "TP3", "TP4", "TP5") else "❌"
             pips      = price_to_pips(t["ticker"], t["pnl"])
             sign      = "+" if pips >= 0 else ""
             t_in      = datetime.fromisoformat(t["entry_time"]).strftime("%H:%M")

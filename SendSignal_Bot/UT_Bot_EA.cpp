@@ -64,7 +64,7 @@ int OnInit()
    g_trade.SetExpertMagicNumber(InpMagic);
    g_trade.SetDeviationInPoints(InpSlippage);
 
-   WarmupATS(300);
+   WarmupATS(1000);
    EventSetTimer(1);
    return INIT_SUCCEEDED;
 }
