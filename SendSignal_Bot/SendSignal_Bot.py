@@ -471,7 +471,9 @@ def webhook(token):
 
     data = request.get_json(force=True, silent=True)
     if not data:
-        return jsonify({"error": "Invalid JSON"}), 400
+        raw = request.get_data(as_text=True)
+        print(f"  ⚠️ JSON lỗi. Body nhận được: {repr(raw[:500])}")
+        return jsonify({"error": "Invalid JSON", "received": raw[:200]}), 400
 
     signal    = data.get("signal", "unknown")
     sig_upper = signal.upper()

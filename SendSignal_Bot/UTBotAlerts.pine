@@ -273,7 +273,7 @@ _tf = timeframe.period
 _c  = str.tostring(close, "#.##")
 
 _hp = str.tostring(hit_price, "#.##")
-_base = ',"interval":"' + _tf + '","exchange":"' + _ex + '"}'
+_base = '","interval":"' + _tf + '","exchange":"' + _ex + '"}'
 
 if long_entry
     alert('{"signal":"UT Long","ticker":"' + _t + '","close":"' + _c + '","tp1":"' + str.tostring(entry_tp1, "#.##") + '","tp2":"' + str.tostring(entry_tp2, "#.##") + '","tp3":"' + str.tostring(entry_tp3, "#.##") + '","tp4":"' + str.tostring(entry_tp4, "#.##") + '","tp5":"' + str.tostring(entry_tp5, "#.##") + '","sl":"' + str.tostring(entry_sl, "#.##") + _base, alert.freq_once_per_bar_close)
