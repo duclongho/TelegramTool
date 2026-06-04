@@ -34,7 +34,8 @@ input int    InpPanelW    = 226;    // Chiều rộng panel
 input int    InpPanelH    = 320;    // Chiều cao panel
 
 //=== STAGE =================================================================
-enum TradeStage { STAGE_NONE, STAGE_OPEN, STAGE_TP1, STAGE_TP2, STAGE_TRAIL };
+//  NONE → OPEN (chờ TP2) → TP2_HIT (SL tại TP1, chờ Mid) → TRAIL
+enum TradeStage { STAGE_NONE, STAGE_OPEN, STAGE_TP2, STAGE_TRAIL };
 
 //=== GLOBALS ===============================================================
 CTrade     g_trade;
@@ -51,7 +52,7 @@ double     g_sl    = 0.0;
 double     g_tp1   = 0.0;
 double     g_tp2   = 0.0;
 double     g_tp3   = 0.0;
-double     g_mid   = 0.0;
+double     g_mid   = 0.0;   // midpoint TP2–TP3, kích hoạt trailing
 
 const string GUI = "UTB_";
 
@@ -118,6 +119,9 @@ void OnChartEvent(const int id, const long& lp, const double& dp, const string& 
 }
 
 //=== QUẢN LÝ SL THEO TỪNG GIAI ĐOẠN ========================================
+//  OPEN  : chờ TP2 (SL giữ nguyên, bỏ qua TP1)
+//  TP2   : giống code gốc — chờ Mid → SL về TP2 → trailing
+//  TRAIL : trailing vô hạn
 void ManageTrade()
 {
    double price = g_is_long
@@ -129,13 +133,15 @@ void ManageTrade()
       switch(g_stage)
       {
          case STAGE_OPEN:
-            if(price >= g_tp1 && MoveSL(g_entry))
-               g_stage = STAGE_TP1;
-            break;
-
-         case STAGE_TP1:
+            // Ưu tiên check TP2 trước
             if(price >= g_tp2 && MoveSL(g_tp1))
                g_stage = STAGE_TP2;
+            else
+            {
+               // Trailing với khoảng cách = InpSL (giống khoảng cách entry→SL ban đầu)
+               double new_sl = NormalizeDouble(price - InpSL, _Digits);
+               if(new_sl > g_sl) MoveSL(new_sl);
+            }
             break;
 
          case STAGE_TP2:
@@ -158,13 +164,13 @@ void ManageTrade()
       switch(g_stage)
       {
          case STAGE_OPEN:
-            if(price <= g_tp1 && MoveSL(g_entry))
-               g_stage = STAGE_TP1;
-            break;
-
-         case STAGE_TP1:
             if(price <= g_tp2 && MoveSL(g_tp1))
                g_stage = STAGE_TP2;
+            else
+            {
+               double new_sl = NormalizeDouble(price + InpSL, _Digits);
+               if(new_sl < g_sl) MoveSL(new_sl);
+            }
             break;
 
          case STAGE_TP2:
@@ -443,12 +449,11 @@ void UpdateGUI()
    color  stageClr;
    switch(g_stage)
    {
-      case STAGE_NONE:  stageTxt = "—  Chờ tín hiệu"; stageClr = clrSilver;     break;
-      case STAGE_OPEN:  stageTxt = "OPEN  (chờ TP1)";  stageClr = clrYellow;     break;
-      case STAGE_TP1:   stageTxt = "TP1 HIT (chờ TP2)";stageClr = clrLimeGreen;  break;
-      case STAGE_TP2:   stageTxt = "TP2 HIT (chờ Mid)";stageClr = C'50,200,120'; break;
-      case STAGE_TRAIL: stageTxt = "TRAILING  ∞";      stageClr = C'80,220,255'; break;
-      default:          stageTxt = "?";                 stageClr = clrSilver;     break;
+      case STAGE_NONE:  stageTxt = "—  Chờ tín hiệu";  stageClr = clrSilver;     break;
+      case STAGE_OPEN:  stageTxt = "OPEN  (chờ TP2)";   stageClr = clrYellow;     break;
+      case STAGE_TP2:   stageTxt = "TP2 HIT (chờ Mid)"; stageClr = clrLimeGreen;  break;
+      case STAGE_TRAIL: stageTxt = "TRAILING  ∞";       stageClr = C'80,220,255'; break;
+      default:          stageTxt = "?";                  stageClr = clrSilver;     break;
    }
    Lbl("St",  "Stage  : " + stageTxt,        tx, y, stageClr);          y += lh;
 
@@ -467,13 +472,11 @@ void UpdateGUI()
    Lbl("SL",  "SL     : " + (hasPos ? DoubleToString(g_sl, d) : na),
                                               tx, y, clrTomato);         y += lh;
 
-   // TP1: xanh lá nếu đã hit (stage >= TP1)
-   bool tp1done = (g_stage == STAGE_TP1 || g_stage == STAGE_TP2 || g_stage == STAGE_TRAIL);
    bool tp2done = (g_stage == STAGE_TP2 || g_stage == STAGE_TRAIL);
    bool middone = (g_stage == STAGE_TRAIL);
 
-   Lbl("T1",  "TP1    : " + (hasPos ? DoubleToString(g_tp1, d) : na) + (tp1done ? "  ✅" : ""),
-                                              tx, y, tp1done ? clrLimeGreen : clrSilver); y += lh;
+   Lbl("T1",  "TP1    : " + (hasPos ? DoubleToString(g_tp1, d) : na),
+                                              tx, y, clrSilver);          y += lh;
    Lbl("T2",  "TP2    : " + (hasPos ? DoubleToString(g_tp2, d) : na) + (tp2done ? "  ✅" : ""),
                                               tx, y, tp2done ? clrLimeGreen : clrSilver); y += lh;
    Lbl("Mi",  "Mid    : " + (hasPos ? DoubleToString(g_mid, d) : na) + (middone ? "  ✅" : ""),

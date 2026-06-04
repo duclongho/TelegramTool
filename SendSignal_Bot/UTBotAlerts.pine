@@ -52,30 +52,22 @@ var line  ln_tp5     = na
 var line  ln_sl      = na
 
 // Lưu riêng để dùng trong alert (không bị TP handler xóa)
-var float entry_tp1  = na
-var float entry_tp2  = na
-var float entry_tp3  = na
-var float entry_tp4  = na
-var float entry_tp5  = na
-var float entry_sl   = na
+var float entry_tp1      = na
+var float entry_tp2      = na
+var float entry_tp3      = na
+var float entry_tp4      = na
+var float entry_tp5      = na
+var float entry_sl       = na
+
+// Cờ xác nhận entry đã được gửi (chỉ true sau khi bar entry đóng)
+var bool  entry_confirmed = false
 
 // Vào lệnh mới khi: chưa có lệnh (trade_dir==0) HOẶC đã hit TP1 (tp1_level==na)
 long_entry  = buy  and (trade_dir == 0 or na(tp1_level))
 short_entry = sell and (trade_dir == 0 or na(tp1_level))
 
+// Tính levels mỗi tick (cần cho TP/SL conditions)
 if long_entry
-    if not na(ln_tp1)
-        line.delete(ln_tp1)
-    if not na(ln_tp2)
-        line.delete(ln_tp2)
-    if not na(ln_tp3)
-        line.delete(ln_tp3)
-    if not na(ln_tp4)
-        line.delete(ln_tp4)
-    if not na(ln_tp5)
-        line.delete(ln_tp5)
-    if not na(ln_sl)
-        line.delete(ln_sl)
     trade_dir := 1
     tp1_level := close + tp1_pts
     tp2_level := close + tp2_pts
@@ -89,26 +81,8 @@ if long_entry
     entry_tp4 := tp4_level
     entry_tp5 := tp5_level
     entry_sl  := sl_level
-    ln_tp1 := line.new(bar_index, tp1_level, bar_index+1, tp1_level, color=color.new(color.green, 70), width=1, extend=extend.right)
-    ln_tp2 := line.new(bar_index, tp2_level, bar_index+1, tp2_level, color=color.new(color.green, 50), width=1, extend=extend.right)
-    ln_tp3 := line.new(bar_index, tp3_level, bar_index+1, tp3_level, color=color.new(color.green, 30), width=1, extend=extend.right)
-    ln_tp4 := line.new(bar_index, tp4_level, bar_index+1, tp4_level, color=color.new(color.green, 10), width=2, extend=extend.right)
-    ln_tp5 := line.new(bar_index, tp5_level, bar_index+1, tp5_level, color=color.green,               width=2, extend=extend.right)
-    ln_sl  := line.new(bar_index, sl_level,  bar_index+1, sl_level,  color=color.red,                 width=1, extend=extend.right)
 
 if short_entry
-    if not na(ln_tp1)
-        line.delete(ln_tp1)
-    if not na(ln_tp2)
-        line.delete(ln_tp2)
-    if not na(ln_tp3)
-        line.delete(ln_tp3)
-    if not na(ln_tp4)
-        line.delete(ln_tp4)
-    if not na(ln_tp5)
-        line.delete(ln_tp5)
-    if not na(ln_sl)
-        line.delete(ln_sl)
     trade_dir := -1
     tp1_level := close - tp1_pts
     tp2_level := close - tp2_pts
@@ -122,6 +96,25 @@ if short_entry
     entry_tp4 := tp4_level
     entry_tp5 := tp5_level
     entry_sl  := sl_level
+
+// Set entry_confirmed TRƯỚC khi vẽ lines (thứ tự quan trọng)
+if (long_entry or short_entry) and barstate.isconfirmed
+    entry_confirmed := true
+
+// Vẽ lines khi entry_confirmed vừa được set (bar đóng) → không có orphaned lines
+if entry_confirmed and long_entry
+    if not na(ln_tp1)
+        line.delete(ln_tp1)
+    if not na(ln_tp2)
+        line.delete(ln_tp2)
+    if not na(ln_tp3)
+        line.delete(ln_tp3)
+    if not na(ln_tp4)
+        line.delete(ln_tp4)
+    if not na(ln_tp5)
+        line.delete(ln_tp5)
+    if not na(ln_sl)
+        line.delete(ln_sl)
     ln_tp1 := line.new(bar_index, tp1_level, bar_index+1, tp1_level, color=color.new(color.green, 70), width=1, extend=extend.right)
     ln_tp2 := line.new(bar_index, tp2_level, bar_index+1, tp2_level, color=color.new(color.green, 50), width=1, extend=extend.right)
     ln_tp3 := line.new(bar_index, tp3_level, bar_index+1, tp3_level, color=color.new(color.green, 30), width=1, extend=extend.right)
@@ -129,20 +122,41 @@ if short_entry
     ln_tp5 := line.new(bar_index, tp5_level, bar_index+1, tp5_level, color=color.green,               width=2, extend=extend.right)
     ln_sl  := line.new(bar_index, sl_level,  bar_index+1, sl_level,  color=color.red,                 width=1, extend=extend.right)
 
-// Kiểm tra TP/SL bị chạm (ưu tiên TP cao nhất trước: TP5 > TP4 > TP3 > TP2 > TP1)
-long_tp5_hit  = trade_dir ==  1 and not na(tp5_level) and high >= tp5_level
-long_tp4_hit  = trade_dir ==  1 and not na(tp4_level) and high >= tp4_level and not long_tp5_hit
-long_tp3_hit  = trade_dir ==  1 and not na(tp3_level) and high >= tp3_level and not long_tp4_hit and not long_tp5_hit
-long_tp2_hit  = trade_dir ==  1 and not na(tp2_level) and high >= tp2_level and not long_tp3_hit and not long_tp4_hit and not long_tp5_hit
-long_tp1_hit  = trade_dir ==  1 and not na(tp1_level) and high >= tp1_level and not long_tp2_hit and not long_tp3_hit and not long_tp4_hit and not long_tp5_hit
-long_sl_hit   = trade_dir ==  1 and not na(sl_level)  and low  <= sl_level  and not long_entry
+if entry_confirmed and short_entry
+    if not na(ln_tp1)
+        line.delete(ln_tp1)
+    if not na(ln_tp2)
+        line.delete(ln_tp2)
+    if not na(ln_tp3)
+        line.delete(ln_tp3)
+    if not na(ln_tp4)
+        line.delete(ln_tp4)
+    if not na(ln_tp5)
+        line.delete(ln_tp5)
+    if not na(ln_sl)
+        line.delete(ln_sl)
+    ln_tp1 := line.new(bar_index, tp1_level, bar_index+1, tp1_level, color=color.new(color.green, 70), width=1, extend=extend.right)
+    ln_tp2 := line.new(bar_index, tp2_level, bar_index+1, tp2_level, color=color.new(color.green, 50), width=1, extend=extend.right)
+    ln_tp3 := line.new(bar_index, tp3_level, bar_index+1, tp3_level, color=color.new(color.green, 30), width=1, extend=extend.right)
+    ln_tp4 := line.new(bar_index, tp4_level, bar_index+1, tp4_level, color=color.new(color.green, 10), width=2, extend=extend.right)
+    ln_tp5 := line.new(bar_index, tp5_level, bar_index+1, tp5_level, color=color.green,               width=2, extend=extend.right)
+    ln_sl  := line.new(bar_index, sl_level,  bar_index+1, sl_level,  color=color.red,                 width=1, extend=extend.right)
 
-short_tp5_hit = trade_dir == -1 and not na(tp5_level) and low  <= tp5_level
-short_tp4_hit = trade_dir == -1 and not na(tp4_level) and low  <= tp4_level and not short_tp5_hit
-short_tp3_hit = trade_dir == -1 and not na(tp3_level) and low  <= tp3_level and not short_tp4_hit and not short_tp5_hit
-short_tp2_hit = trade_dir == -1 and not na(tp2_level) and low  <= tp2_level and not short_tp3_hit and not short_tp4_hit and not short_tp5_hit
-short_tp1_hit = trade_dir == -1 and not na(tp1_level) and low  <= tp1_level and not short_tp2_hit and not short_tp3_hit and not short_tp4_hit and not short_tp5_hit
-short_sl_hit  = trade_dir == -1 and not na(sl_level)  and high >= sl_level  and not short_entry
+// Kiểm tra TP/SL bị chạm — chỉ khi entry đã được gửi (entry_confirmed = true)
+long_sl_hit   = entry_confirmed and trade_dir ==  1 and not na(sl_level)  and low  <= sl_level  and not long_entry
+short_sl_hit  = entry_confirmed and trade_dir == -1 and not na(sl_level)  and high >= sl_level  and not short_entry
+
+long_tp5_hit  = entry_confirmed and trade_dir ==  1 and not na(tp5_level) and high >= tp5_level and not long_sl_hit  and not long_entry
+long_tp4_hit  = entry_confirmed and trade_dir ==  1 and not na(tp4_level) and high >= tp4_level and not long_tp5_hit  and not long_sl_hit and not long_entry
+long_tp3_hit  = entry_confirmed and trade_dir ==  1 and not na(tp3_level) and high >= tp3_level and not long_tp4_hit  and not long_tp5_hit  and not long_sl_hit and not long_entry
+long_tp2_hit  = entry_confirmed and trade_dir ==  1 and not na(tp2_level) and high >= tp2_level and not long_tp3_hit  and not long_tp4_hit  and not long_tp5_hit  and not long_sl_hit and not long_entry
+long_tp1_hit  = entry_confirmed and trade_dir ==  1 and not na(tp1_level) and high >= tp1_level and not long_tp2_hit  and not long_tp3_hit  and not long_tp4_hit  and not long_tp5_hit  and not long_sl_hit and not long_entry
+
+short_tp5_hit = entry_confirmed and trade_dir == -1 and not na(tp5_level) and low  <= tp5_level and not short_sl_hit and not short_entry
+short_tp4_hit = entry_confirmed and trade_dir == -1 and not na(tp4_level) and low  <= tp4_level and not short_tp5_hit and not short_sl_hit and not short_entry
+short_tp3_hit = entry_confirmed and trade_dir == -1 and not na(tp3_level) and low  <= tp3_level and not short_tp4_hit and not short_tp5_hit and not short_sl_hit and not short_entry
+short_tp2_hit = entry_confirmed and trade_dir == -1 and not na(tp2_level) and low  <= tp2_level and not short_tp3_hit and not short_tp4_hit and not short_tp5_hit and not short_sl_hit and not short_entry
+short_tp1_hit = entry_confirmed and trade_dir == -1 and not na(tp1_level) and low  <= tp1_level and not short_tp2_hit and not short_tp3_hit and not short_tp4_hit and not short_tp5_hit and not short_sl_hit and not short_entry
 
 var float hit_price = na
 
@@ -232,8 +246,9 @@ if long_tp1_hit or short_tp1_hit
 
 // SL bị chạm: đóng lệnh hoàn toàn, xóa tất cả đường
 if long_sl_hit or short_sl_hit
-    hit_price := sl_level
-    trade_dir := 0
+    hit_price       := sl_level
+    entry_confirmed := false
+    trade_dir       := 0
     tp1_level := na
     tp2_level := na
     tp3_level := na

@@ -116,9 +116,11 @@ def record_trade_open(data: dict):
         tp1 = float(data.get("tp1", 0)) if data.get("tp1") else None
         tp2 = float(data.get("tp2", 0)) if data.get("tp2") else None
         tp3 = float(data.get("tp3", 0)) if data.get("tp3") else None
+        tp4 = float(data.get("tp4", 0)) if data.get("tp4") else None
+        tp5 = float(data.get("tp5", 0)) if data.get("tp5") else None
         sl  = float(data.get("sl",  0)) if data.get("sl")  else None
     except (ValueError, TypeError):
-        tp1 = tp2 = tp3 = sl = None
+        tp1 = tp2 = tp3 = tp4 = tp5 = sl = None
 
     open_trades[ticker] = {
         "ticker":      ticker,
@@ -127,6 +129,8 @@ def record_trade_open(data: dict):
         "tp1":         tp1,
         "tp2":         tp2,
         "tp3":         tp3,
+        "tp4":         tp4,
+        "tp5":         tp5,
         "sl":          sl,
         "entry_time":  datetime.now().isoformat(),
         "exit_price":  None,
@@ -241,6 +245,8 @@ def format_message(data: dict) -> str:
     tp1       = _price(data.get("tp1"))
     tp2       = _price(data.get("tp2"))
     tp3       = _price(data.get("tp3"))
+    tp4       = _price(data.get("tp4"))
+    tp5       = _price(data.get("tp5"))
     sl        = _price(data.get("sl"))
     hit_price = _price(data.get("hit_price"))
 
@@ -284,7 +290,9 @@ def format_message(data: dict) -> str:
     ]
 
     if hit_price:
-        if "TP3" in sig_upper:   label = "TP3"
+        if "TP5" in sig_upper:   label = "TP5"
+        elif "TP4" in sig_upper: label = "TP4"
+        elif "TP3" in sig_upper: label = "TP3"
         elif "TP2" in sig_upper: label = "TP2"
         elif "TP1" in sig_upper: label = "TP1"
         else:                    label = "SL"
@@ -294,6 +302,8 @@ def format_message(data: dict) -> str:
         if tp1: lines.append(f"🎯 TP1: {tp1}")
         if tp2: lines.append(f"🎯 TP2: {tp2}")
         if tp3: lines.append(f"🎯 TP3: {tp3}")
+        if tp4: lines.append(f"🎯 TP4: {tp4}")
+        if tp5: lines.append(f"🎯 TP5: {tp5}")
         if sl:  lines.append(f"🛑 SL:  {sl}")
 
     lines.append(f"🕐 {now}")
@@ -404,14 +414,17 @@ async def send_all(message: str):
 
 # --- LỊCH GỬI THÔNG BÁO ---
 # (hour, minute, type, *args)
-#   "morning"  : tổng kết ngày hôm qua
-#   "partial"  : thống kê khung giờ — args = (from_h, to_h, period_name)
-#   "daily"    : tổng kết cuối ngày + reset dữ liệu
-# 3 giờ cố định trong ngày (không lấy từ Excel)
+#   "morning" : ĐỌC file hôm qua → gửi (không lưu, không reset)
+#   "partial" : thống kê khung giờ trong ngày
+#   "reset"   : tổng kết cuối ngày + lưu hôm nay làm hôm qua + reset
+#
+# Giờ_Tổng_Kết (Excel) = giờ sáng hiển thị tổng kết hôm qua
+# Reset cố định lúc 23:55 mỗi ngày
 _FIXED_SCHEDULE = [
-    (12, 0, "partial", 0,  12, "BUỔI SÁNG"),
-    (17, 0, "partial", 12, 17, "BUỔI CHIỀU"),
-    (22, 0, "partial", 17, 22, "BUỔI TỐI"),
+    (12, 0,  "partial", 0,  12, "BUỔI SÁNG"),
+    (17, 0,  "partial", 12, 17, "BUỔI CHIỀU"),
+    (22, 0,  "partial", 17, 22, "BUỔI TỐI"),
+    (23, 55, "reset"),
 ]
 
 
@@ -420,7 +433,7 @@ async def notification_scheduler():
         now = datetime.now()
         h_m, m_m = map(int, cfg["summary_time"].split(":"))
 
-        # Giờ sáng lấy từ Excel (Giờ_Tổng_Kết); 3 giờ còn lại cố định
+        # Giờ sáng từ Excel + lịch cố định
         schedule = list(_FIXED_SCHEDULE) + [(h_m, m_m, "morning")]
 
         # Tìm thông báo kế tiếp gần nhất
@@ -440,24 +453,34 @@ async def notification_scheduler():
 
         await asyncio.sleep(wait)
 
+        # Thứ 7 (5) và Chủ Nhật (6): bỏ qua tất cả thông báo
+        if datetime.now().weekday() >= 5:
+            print(f"📅 Cuối tuần — bỏ qua thông báo [{ntype}]")
+            await asyncio.sleep(61)
+            continue
+
         if ntype == "morning":
-            # Lưu dữ liệu ngày hôm qua rồi gửi tổng kết, sau đó reset cho ngày mới
-            save_yesterday()
+            # Chỉ ĐỌC file hôm qua (đã lưu từ 23:55 đêm qua) → gửi
             msg = format_morning_summary()
             if msg:
                 print("\n🌅 Đang gửi tổng kết hôm qua...")
                 await send_all(msg)
             else:
                 print("\n🌅 Không có dữ liệu hôm qua, bỏ qua.")
-            closed_trades.clear()
-            open_trades.clear()
-            if os.path.exists(TRADES_FILE):
-                os.remove(TRADES_FILE)
 
         elif ntype == "partial":
             _, _, _, from_h, to_h, period_name = next_item
             print(f"\n📊 Đang gửi thống kê {period_name}...")
             await send_all(format_partial_summary(from_h, to_h, period_name))
+
+        elif ntype == "reset":
+            # 23:55: lưu hôm nay làm hôm qua + reset (không gửi thông báo, sáng mai sẽ gửi)
+            print("\n🔄 Reset cuối ngày...")
+            save_yesterday()
+            closed_trades.clear()
+            open_trades.clear()
+            if os.path.exists(TRADES_FILE):
+                os.remove(TRADES_FILE)
 
         await asyncio.sleep(61)  # tránh kích hoạt 2 lần trong cùng phút
 
