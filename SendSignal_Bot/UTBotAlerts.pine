@@ -58,6 +58,9 @@ var float entry_tp3      = na
 var float entry_tp4      = na
 var float entry_tp5      = na
 var float entry_sl       = na
+var float entry_close      = na    // giá vào lệnh, lưu để dùng khi retry
+var int   entry_bar_index  = -1   // bar_index của lệnh hiện tại
+var bool  entry_alert_sent = false // đã gửi alert entry cho lệnh này chưa
 
 // Cờ xác nhận entry đã được gửi (chỉ true sau khi bar entry đóng)
 var bool  entry_confirmed = false
@@ -68,6 +71,9 @@ short_entry = sell and (trade_dir == 0 or na(tp1_level))
 
 // Tính levels mỗi tick (cần cho TP/SL conditions)
 if long_entry
+    entry_close      := close
+    entry_bar_index  := bar_index
+    entry_alert_sent := false
     trade_dir := 1
     tp1_level := close + tp1_pts
     tp2_level := close + tp2_pts
@@ -83,6 +89,9 @@ if long_entry
     entry_sl  := sl_level
 
 if short_entry
+    entry_close      := close
+    entry_bar_index  := bar_index
+    entry_alert_sent := false
     trade_dir := -1
     tp1_level := close - tp1_pts
     tp2_level := close - tp2_pts
@@ -143,20 +152,25 @@ if entry_confirmed and short_entry
     ln_sl  := line.new(bar_index, sl_level,  bar_index+1, sl_level,  color=color.red,                 width=1, extend=extend.right)
 
 // Kiểm tra TP/SL bị chạm — chỉ khi entry đã được gửi (entry_confirmed = true)
-long_sl_hit   = entry_confirmed and trade_dir ==  1 and not na(sl_level)  and low  <= sl_level  and not long_entry
-short_sl_hit  = entry_confirmed and trade_dir == -1 and not na(sl_level)  and high >= sl_level  and not short_entry
+
+// Raw TP1: giá TP1 đã chạm trong bar này chưa (không phụ thuộc SL)
+_long_tp1_raw  = entry_confirmed and trade_dir ==  1 and not na(tp1_level) and high >= tp1_level and not long_entry
+_short_tp1_raw = entry_confirmed and trade_dir == -1 and not na(tp1_level) and low  <= tp1_level and not short_entry
+
+long_sl_hit   = entry_confirmed and trade_dir ==  1 and not na(sl_level)  and low  <= sl_level  and not long_entry  and not _long_tp1_raw
+short_sl_hit  = entry_confirmed and trade_dir == -1 and not na(sl_level)  and high >= sl_level  and not short_entry and not _short_tp1_raw
 
 long_tp5_hit  = entry_confirmed and trade_dir ==  1 and not na(tp5_level) and high >= tp5_level and not long_sl_hit  and not long_entry
 long_tp4_hit  = entry_confirmed and trade_dir ==  1 and not na(tp4_level) and high >= tp4_level and not long_tp5_hit  and not long_sl_hit and not long_entry
 long_tp3_hit  = entry_confirmed and trade_dir ==  1 and not na(tp3_level) and high >= tp3_level and not long_tp4_hit  and not long_tp5_hit  and not long_sl_hit and not long_entry
 long_tp2_hit  = entry_confirmed and trade_dir ==  1 and not na(tp2_level) and high >= tp2_level and not long_tp3_hit  and not long_tp4_hit  and not long_tp5_hit  and not long_sl_hit and not long_entry
-long_tp1_hit  = entry_confirmed and trade_dir ==  1 and not na(tp1_level) and high >= tp1_level and not long_tp2_hit  and not long_tp3_hit  and not long_tp4_hit  and not long_tp5_hit  and not long_sl_hit and not long_entry
+long_tp1_hit  = _long_tp1_raw  and not long_tp2_hit  and not long_tp3_hit  and not long_tp4_hit  and not long_tp5_hit  and not long_sl_hit
 
 short_tp5_hit = entry_confirmed and trade_dir == -1 and not na(tp5_level) and low  <= tp5_level and not short_sl_hit and not short_entry
 short_tp4_hit = entry_confirmed and trade_dir == -1 and not na(tp4_level) and low  <= tp4_level and not short_tp5_hit and not short_sl_hit and not short_entry
 short_tp3_hit = entry_confirmed and trade_dir == -1 and not na(tp3_level) and low  <= tp3_level and not short_tp4_hit and not short_tp5_hit and not short_sl_hit and not short_entry
 short_tp2_hit = entry_confirmed and trade_dir == -1 and not na(tp2_level) and low  <= tp2_level and not short_tp3_hit and not short_tp4_hit and not short_tp5_hit and not short_sl_hit and not short_entry
-short_tp1_hit = entry_confirmed and trade_dir == -1 and not na(tp1_level) and low  <= tp1_level and not short_tp2_hit and not short_tp3_hit and not short_tp4_hit and not short_tp5_hit and not short_sl_hit and not short_entry
+short_tp1_hit = _short_tp1_raw and not short_tp2_hit and not short_tp3_hit and not short_tp4_hit and not short_tp5_hit and not short_sl_hit
 
 var float hit_price = na
 
@@ -290,11 +304,28 @@ _c  = str.tostring(close, "#.##")
 _hp = str.tostring(hit_price, "#.##")
 _base = '","interval":"' + _tf + '","exchange":"' + _ex + '"}'
 
+_ec = str.tostring(entry_close, "#.##")
+
+// Gửi khi bar entry đóng; đánh dấu đã gửi
 if long_entry
-    alert('{"signal":"UT Long","ticker":"' + _t + '","close":"' + _c + '","tp1":"' + str.tostring(entry_tp1, "#.##") + '","tp2":"' + str.tostring(entry_tp2, "#.##") + '","tp3":"' + str.tostring(entry_tp3, "#.##") + '","tp4":"' + str.tostring(entry_tp4, "#.##") + '","tp5":"' + str.tostring(entry_tp5, "#.##") + '","sl":"' + str.tostring(entry_sl, "#.##") + _base, alert.freq_once_per_bar_close)
+    alert('{"signal":"UT Long","ticker":"' + _t + '","close":"' + _ec + '","tp1":"' + str.tostring(entry_tp1, "#.##") + '","tp2":"' + str.tostring(entry_tp2, "#.##") + '","tp3":"' + str.tostring(entry_tp3, "#.##") + '","tp4":"' + str.tostring(entry_tp4, "#.##") + '","tp5":"' + str.tostring(entry_tp5, "#.##") + '","sl":"' + str.tostring(entry_sl, "#.##") + _base, alert.freq_once_per_bar_close)
+    entry_alert_sent := true
 
 if short_entry
-    alert('{"signal":"UT Short","ticker":"' + _t + '","close":"' + _c + '","tp1":"' + str.tostring(entry_tp1, "#.##") + '","tp2":"' + str.tostring(entry_tp2, "#.##") + '","tp3":"' + str.tostring(entry_tp3, "#.##") + '","tp4":"' + str.tostring(entry_tp4, "#.##") + '","tp5":"' + str.tostring(entry_tp5, "#.##") + '","sl":"' + str.tostring(entry_sl, "#.##") + _base, alert.freq_once_per_bar_close)
+    alert('{"signal":"UT Short","ticker":"' + _t + '","close":"' + _ec + '","tp1":"' + str.tostring(entry_tp1, "#.##") + '","tp2":"' + str.tostring(entry_tp2, "#.##") + '","tp3":"' + str.tostring(entry_tp3, "#.##") + '","tp4":"' + str.tostring(entry_tp4, "#.##") + '","tp5":"' + str.tostring(entry_tp5, "#.##") + '","sl":"' + str.tostring(entry_sl, "#.##") + _base, alert.freq_once_per_bar_close)
+    entry_alert_sent := true
+
+// Retry ~10s sau bar đóng: tick đầu tiên của bar kế tiếp
+// freq_once_per_bar → chỉ gửi 1 lần trong bar đó, không liên tục
+if trade_dir == 1 and not entry_alert_sent and entry_confirmed and bar_index > entry_bar_index
+    alert('{"signal":"UT Long","ticker":"' + _t + '","close":"' + _ec + '","tp1":"' + str.tostring(entry_tp1, "#.##") + '","tp2":"' + str.tostring(entry_tp2, "#.##") + '","tp3":"' + str.tostring(entry_tp3, "#.##") + '","tp4":"' + str.tostring(entry_tp4, "#.##") + '","tp5":"' + str.tostring(entry_tp5, "#.##") + '","sl":"' + str.tostring(entry_sl, "#.##") + _base, alert.freq_once_per_bar)
+
+if trade_dir == -1 and not entry_alert_sent and entry_confirmed and bar_index > entry_bar_index
+    alert('{"signal":"UT Short","ticker":"' + _t + '","close":"' + _ec + '","tp1":"' + str.tostring(entry_tp1, "#.##") + '","tp2":"' + str.tostring(entry_tp2, "#.##") + '","tp3":"' + str.tostring(entry_tp3, "#.##") + '","tp4":"' + str.tostring(entry_tp4, "#.##") + '","tp5":"' + str.tostring(entry_tp5, "#.##") + '","sl":"' + str.tostring(entry_sl, "#.##") + _base, alert.freq_once_per_bar)
+
+// Commit flag khi bar retry đóng → ngăn gửi lại từ bar N+2 trở đi
+if (trade_dir == 1 or trade_dir == -1) and not entry_alert_sent and entry_confirmed and bar_index > entry_bar_index and barstate.isconfirmed
+    entry_alert_sent := true
 
 if long_tp1_hit
     alert('{"signal":"UT Long TP1","ticker":"' + _t + '","close":"' + _c + '","hit_price":"' + _hp + _base, alert.freq_once_per_bar)
