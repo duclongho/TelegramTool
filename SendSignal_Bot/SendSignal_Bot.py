@@ -453,8 +453,10 @@ async def notification_scheduler():
 
         await asyncio.sleep(wait)
 
-        # Thứ 7 (5) và Chủ Nhật (6): bỏ qua tất cả thông báo
-        if datetime.now().weekday() >= 5:
+        # Chủ Nhật (6): bỏ qua tất cả
+        # Thứ 7 (5): chỉ cho phép "morning" (tổng kết thứ 6), skip phần còn lại
+        wd = datetime.now().weekday()
+        if wd == 6 or (wd == 5 and ntype != "morning"):
             print(f"📅 Cuối tuần — bỏ qua thông báo [{ntype}]")
             await asyncio.sleep(61)
             continue
