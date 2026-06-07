@@ -20,6 +20,7 @@ closed_trades = []   # list (lệnh đã đóng trong ngày)
 
 TRADES_FILE    = "trades.json"
 YESTERDAY_FILE = "trades_yesterday.json"
+VOLUME         = 0.1   # Khối lượng giao dịch mặc định (lots)
 
 
 # --- LƯU / TẢI DỮ LIỆU ---
@@ -126,6 +127,7 @@ def record_trade_open(data: dict):
         "ticker":      ticker,
         "direction":   direction,
         "entry_price": entry_price,
+        "volume":      VOLUME,
         "tp1":         tp1,
         "tp2":         tp2,
         "tp3":         tp3,
@@ -209,6 +211,21 @@ def price_to_pips(ticker: str, price_diff: float) -> int:
         pip_size = 0.0001
     sign = 1 if price_diff >= 0 else -1
     return int(round(abs(price_diff) / pip_size)) * sign
+
+
+# --- TÍNH TIỀN USD TỪ CHÊNH LỆCH GIÁ ---
+def price_to_money(ticker: str, price_diff: float, volume: float = VOLUME) -> float:
+    """Tính lợi nhuận/thua lỗ USD từ chênh lệch giá và khối lượng (có dấu)."""
+    t = ticker.upper()
+    if "XAU" in t:
+        contract_size = 100.0       # 1 lot = 100 oz vàng
+    elif "XAG" in t:
+        contract_size = 5000.0      # 1 lot = 5,000 oz bạc
+    elif any(c in t for c in ["BTC", "ETH", "BNB", "SOL", "XRP"]):
+        contract_size = 1.0         # 1 lot = 1 coin
+    else:
+        contract_size = 100000.0    # Forex: 1 lot = 100,000 units
+    return round(price_diff * contract_size * volume, 2)
 
 
 # --- KIỂM TRA GIÁ HỢP LỆ (loại bỏ NaN / rỗng từ Pine Script) ---
@@ -320,21 +337,27 @@ def _build_summary(title: str, trades: list, open_tds: dict | None = None) -> st
     pip_profit = sum(price_to_pips(t["ticker"], t["pnl"]) for t in trades if t.get("pnl") and t["pnl"] > 0)
     pip_loss   = sum(price_to_pips(t["ticker"], t["pnl"]) for t in trades if t.get("pnl") and t["pnl"] < 0)
     net_pips   = pip_profit + pip_loss
-    win_rate   = f"{wins / len(trades) * 100:.0f}%" if trades else "—"
-    net_icon   = "📈" if net_pips >= 0 else "📉"
-    net_sign   = "+" if net_pips >= 0 else ""
+
+    money_profit = sum(price_to_money(t["ticker"], t["pnl"], t.get("volume", VOLUME)) for t in trades if t.get("pnl") and t["pnl"] > 0)
+    money_loss   = sum(price_to_money(t["ticker"], t["pnl"], t.get("volume", VOLUME)) for t in trades if t.get("pnl") and t["pnl"] < 0)
+    net_money    = round(money_profit + money_loss, 2)
+
+    win_rate  = f"{wins / len(trades) * 100:.0f}%" if trades else "—"
+    net_icon  = "📈" if net_pips >= 0 else "📉"
+    net_sign  = "+" if net_pips >= 0 else ""
+    net_m_str = f"+${net_money:.2f}" if net_money >= 0 else f"-${abs(net_money):.2f}"
 
     lines = [
         "🔔 <b>RICH FOUNDATION</b> 🔔",
         f"📊 <b>{title}</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        f"📥 Tổng lệnh: <b>{total}</b>",
+        f"📥 Tổng lệnh: <b>{total}</b>  |  KL: {VOLUME} lot",
         f"✅ Thắng (TP): <b>{wins}</b>  |  ❌ Thua (SL): <b>{losses}</b>",
         f"📊 Tỉ lệ thắng: <b>{win_rate}</b>",
         "",
-        f"💰 Tổng lãi:  +{pip_profit} pip",
-        f"📉 Tổng lỗ:   {pip_loss} pip",
-        f"{net_icon} Net P&L: <b>{net_sign}{net_pips} pip</b>",
+        f"💰 Tổng lãi:  +{pip_profit} pip  (+${money_profit:.2f})",
+        f"📉 Tổng lỗ:   {pip_loss} pip  (-${abs(money_loss):.2f})",
+        f"{net_icon} Net P&L: <b>{net_sign}{net_pips} pip  ({net_m_str})</b>",
     ]
 
     if still_open:
@@ -346,13 +369,15 @@ def _build_summary(title: str, trades: list, open_tds: dict | None = None) -> st
         for t in trades:
             icon      = "✅" if t["result"] in ("TP1", "TP2", "TP3", "TP4", "TP5") else "❌"
             pips      = price_to_pips(t["ticker"], t["pnl"])
+            money     = price_to_money(t["ticker"], t["pnl"], t.get("volume", VOLUME))
             sign      = "+" if pips >= 0 else ""
+            m_str     = f"+${money:.2f}" if money >= 0 else f"-${abs(money):.2f}"
             t_in      = datetime.fromisoformat(t["entry_time"]).strftime("%H:%M")
             t_out     = datetime.fromisoformat(t["exit_time"]).strftime("%H:%M") if t.get("exit_time") else "?"
             direction = "BUY" if t["direction"] == "LONG" else "SELL"
             lines.append(
                 f"{icon} {direction} <b>{t['ticker']}</b> [{t['result']}]  "
-                f"{sign}{pips} pip  |  {t_in}→{t_out}"
+                f"{sign}{pips} pip ({m_str})  |  {t_in}→{t_out}"
             )
 
     if open_tds:
@@ -361,7 +386,8 @@ def _build_summary(title: str, trades: list, open_tds: dict | None = None) -> st
         for ticker, t in open_tds.items():
             t_in      = datetime.fromisoformat(t["entry_time"]).strftime("%H:%M")
             direction = "BUY" if t["direction"] == "LONG" else "SELL"
-            lines.append(f"  {direction} <b>{ticker}</b>  vào {t['entry_price']}  lúc {t_in}")
+            vol       = t.get("volume", VOLUME)
+            lines.append(f"  {direction} <b>{ticker}</b>  vào {t['entry_price']}  KL: {vol} lot  lúc {t_in}")
 
     return "\n".join(lines)
 
