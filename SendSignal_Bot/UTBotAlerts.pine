@@ -174,7 +174,7 @@ short_tp1_hit = _short_tp1_raw and not short_tp2_hit and not short_tp3_hit and n
 
 var float hit_price = na
 
-// TP5 bị chạm: xóa TP1→TP5, lệnh vẫn sống chờ SL hoặc tín hiệu mới
+// TP5 bị chạm: xóa TP1→TP5 + SL, lệnh kết thúc
 if long_tp5_hit or short_tp5_hit
     hit_price := tp5_level
     if not na(ln_tp1)
@@ -197,8 +197,12 @@ if long_tp5_hit or short_tp5_hit
         line.delete(ln_tp5)
         ln_tp5    := na
         tp5_level := na
+    if not na(ln_sl)
+        line.delete(ln_sl)
+        ln_sl    := na
+        sl_level := na
 
-// TP4 bị chạm: xóa TP1→TP4, TP5 vẫn hiển thị
+// TP4 bị chạm: xóa TP1→TP4 + SL, TP5 vẫn hiển thị
 if long_tp4_hit or short_tp4_hit
     hit_price := tp4_level
     if not na(ln_tp1)
@@ -217,8 +221,12 @@ if long_tp4_hit or short_tp4_hit
         line.delete(ln_tp4)
         ln_tp4    := na
         tp4_level := na
+    if not na(ln_sl)
+        line.delete(ln_sl)
+        ln_sl    := na
+        sl_level := na
 
-// TP3 bị chạm: xóa TP1→TP3, TP4+TP5 vẫn hiển thị
+// TP3 bị chạm: xóa TP1→TP3 + SL, TP4+TP5 vẫn hiển thị
 if long_tp3_hit or short_tp3_hit
     hit_price := tp3_level
     if not na(ln_tp1)
@@ -233,8 +241,12 @@ if long_tp3_hit or short_tp3_hit
         line.delete(ln_tp3)
         ln_tp3    := na
         tp3_level := na
+    if not na(ln_sl)
+        line.delete(ln_sl)
+        ln_sl    := na
+        sl_level := na
 
-// TP2 bị chạm: xóa TP1+TP2, TP3→TP5 vẫn hiển thị
+// TP2 bị chạm: xóa TP1+TP2 + SL, TP3→TP5 vẫn hiển thị
 if long_tp2_hit or short_tp2_hit
     hit_price := tp2_level
     if not na(ln_tp1)
@@ -245,6 +257,10 @@ if long_tp2_hit or short_tp2_hit
         line.delete(ln_tp2)
         ln_tp2    := na
         tp2_level := na
+    if not na(ln_sl)
+        line.delete(ln_sl)
+        ln_sl    := na
+        sl_level := na
 
 // TP1 bị chạm: xóa TP1 và SL, TP2→TP5 vẫn hiển thị
 if long_tp1_hit or short_tp1_hit
