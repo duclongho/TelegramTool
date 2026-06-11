@@ -79,6 +79,7 @@ def _parse_time(val) -> str:
 def load_config(file_path="Data.xlsx"):
     try:
         df = pd.read_excel(file_path)
+        df.columns = df.columns.str.strip()
         dest_ids = [int(x.strip()) for x in str(df["Danh_Sách_ID_Nhận"].iloc[0]).split(",")]
         config = {
             "api_id":       int(df["Mã_API"].iloc[0]),
@@ -87,6 +88,7 @@ def load_config(file_path="Data.xlsx"):
             "port":         int(df["Port"].iloc[0]) if "Port" in df.columns else 80,
             "token":        str(df["Token"].iloc[0]).strip(),
             "summary_time": _parse_time(df["Giờ_Tổng_Kết"].iloc[0]) if "Giờ_Tổng_Kết" in df.columns else "23:59",
+            "web_url":      str(df["Web_URL"].iloc[0]).strip() if "Web_URL" in df.columns else "",
         }
         return config
     except FileNotFoundError:
@@ -513,6 +515,32 @@ async def notification_scheduler():
         await asyncio.sleep(61)  # tránh kích hoạt 2 lần trong cùng phút
 
 
+# --- FORWARD TÍN HIỆU SANG DJANGO WEB ---
+import urllib.request as _urllib_req
+import urllib.error as _urllib_err
+
+def forward_to_web(data: dict):
+    web_url = cfg.get("web_url", "")
+    if not web_url:
+        print("  [Web] CHUA CAU HINH web_url, bo qua.")
+        return
+    try:
+        body = json.dumps(data).encode("utf-8")
+        req = _urllib_req.Request(
+            web_url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _urllib_req.urlopen(req, timeout=5) as resp:
+            print(f"  🌐 Web: {resp.status}")
+    except _urllib_err.HTTPError as e:
+        body_err = e.read().decode('utf-8', errors='ignore')[:300]
+        print(f"  [Web] HTTP {e.code}: {body_err}")
+    except Exception as e:
+        print(f"  [Web] forward error: {type(e).__name__}: {e}")
+
+
 # --- WEBHOOK ENDPOINT ---
 @app.route("/webhook/<token>", methods=["POST"])
 def webhook(token):
@@ -536,6 +564,7 @@ def webhook(token):
         record_trade_open(data)
 
     asyncio.run_coroutine_threadsafe(send_all(format_message(data)), loop)
+    threading.Thread(target=forward_to_web, args=(data,), daemon=True).start()
     return jsonify({"status": "ok", "signal": signal}), 200
 
 
@@ -566,12 +595,17 @@ async def main():
     await client.start()
     me = await client.get_me()
 
+    web_url = cfg.get("web_url", "")
     print("\n" + "=" * 50)
     print(f"✅ Đăng nhập: {me.first_name}")
     print(f"🎯 Đích: {len(cfg['dest_ids'])} nhóm/kênh")
     print(f"🌐 Webhook: http://0.0.0.0:{cfg['port']}/webhook/{cfg['token']}")
     print(f"❤️  Health:  http://0.0.0.0:{cfg['port']}/health")
     print(f"📅 Lịch thông báo: {cfg['summary_time']} (hôm qua + reset) | 12:00 | 17:00 | 22:00")
+    if web_url:
+        print(f"🔗 Web URL: {web_url} ✅")
+    else:
+        print("🔗 Web URL: CHUA CAU HINH (them cot Web_URL vao Data.xlsx)")
     print("=" * 50 + "\n")
 
     threading.Thread(
