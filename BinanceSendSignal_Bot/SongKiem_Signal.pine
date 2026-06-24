@@ -1,0 +1,107 @@
+//@version=6
+indicator("Song Kiem Signal [M15]", overlay = true, max_labels_count = 500)
+
+// ═══════════════════════════════════════════════
+//  INPUTS
+// ═══════════════════════════════════════════════
+int   bb_period   = input.int  (20,   "BB Period",        minval = 1,   group = "Bollinger Bands")
+float bb_mult     = input.float(2.0,  "BB Multiplier",    step   = 0.1, group = "Bollinger Bands")
+float sk_ratio    = input.float(0.90, "Song Kiem Ratio",  step   = 0.05,group = "Song Kiem",
+     tooltip = "Than nen 2 >= X% than nen 1")
+bool  show_bb     = input.bool (true, "Hien thi BB",                    group = "Hien thi")
+bool  show_labels = input.bool (true, "Hien thi nhan Entry/SL",         group = "Hien thi")
+bool  show_shapes = input.bool (true, "Hien thi mui ten",               group = "Hien thi")
+
+// ═══════════════════════════════════════════════
+//  BOLLINGER BANDS  (tính thủ công — tránh lỗi thứ tự tuple ta.bb trong v6)
+// ═══════════════════════════════════════════════
+float bb_middle = ta.sma(close, bb_period)
+float bb_dev    = ta.stdev(close, bb_period, true)   // biased=true = population std, khớp TradingView
+float bb_upper  = bb_middle + bb_mult * bb_dev
+float bb_lower  = bb_middle - bb_mult * bb_dev
+
+p_upper  = plot(show_bb ? bb_upper  : na, "BB Upper",  color.new(color.blue, 40), 1)
+p_middle = plot(show_bb ? bb_middle : na, "BB Middle", color.new(color.gray, 40), 1)
+p_lower  = plot(show_bb ? bb_lower  : na, "BB Lower",  color.new(color.blue, 40), 1)
+fill(p_upper, p_lower, color.new(color.blue, 90))
+
+// ═══════════════════════════════════════════════
+//  CANDLE PROPERTIES
+// ═══════════════════════════════════════════════
+bool  prev_bullish = close[1] > open[1]
+bool  curr_bullish = close    > open
+float prev_body    = math.abs(close[1] - open[1])
+float curr_body    = math.abs(close    - open)
+
+// ═══════════════════════════════════════════════
+//  SHORT SIGNAL
+// ═══════════════════════════════════════════════
+// Điều kiện 1: Close nến XANH (nến 1) chạm hoặc vượt BB upper tại thời điểm đó
+bool short_bb      = prev_bullish and close[1] >= bb_upper[1]
+// Điều kiện 2: Nến 2 đỏ, thân >= sk_ratio% thân nến 1
+bool short_pattern = not curr_bullish and prev_body > 0 and curr_body >= sk_ratio * prev_body
+// Điều kiện 3: Vol nến đỏ > Vol nến xanh
+bool short_vol     = volume > volume[1]
+
+bool short_signal  = short_bb and short_pattern and short_vol
+
+// ═══════════════════════════════════════════════
+//  LONG SIGNAL
+// ═══════════════════════════════════════════════
+// Điều kiện 1: Close nến ĐỎ (nến 1) chạm hoặc xuống dưới BB lower tại thời điểm đó
+bool long_bb       = not prev_bullish and close[1] <= bb_lower[1]
+// Điều kiện 2: Nến 2 xanh, thân >= sk_ratio% thân nến 1
+bool long_pattern  = curr_bullish and prev_body > 0 and curr_body >= sk_ratio * prev_body
+// Điều kiện 3: Vol nến xanh > Vol nến đỏ
+bool long_vol      = volume > volume[1]
+
+bool long_signal   = long_bb and long_pattern and long_vol
+
+// ═══════════════════════════════════════════════
+//  STOP LOSS
+// ═══════════════════════════════════════════════
+float short_sl = math.max(high[1], high)
+float long_sl  = math.min(low[1],  low)
+
+// ═══════════════════════════════════════════════
+//  SHAPES
+// ═══════════════════════════════════════════════
+plotshape(show_shapes and short_signal, "SHORT", shape.triangledown, location.abovebar, color.red,   size = size.small)
+plotshape(show_shapes and long_signal,  "LONG",  shape.triangleup,   location.belowbar, color.green, size = size.small)
+
+// ═══════════════════════════════════════════════
+//  LABELS
+// ═══════════════════════════════════════════════
+float atr_offset = ta.atr(14) * 0.6
+
+if short_signal and show_labels
+    label.new(
+         x          = bar_index,
+         y          = high + atr_offset,
+         text       = "SHORT\nEntry : " + str.tostring(close,    format.mintick)
+                    + "\nSL    : "      + str.tostring(short_sl, format.mintick),
+         color      = color.new(color.red, 5),
+         textcolor  = color.white,
+         style      = label.style_label_down,
+         size       = size.normal,
+         force_overlay = true
+    )
+
+if long_signal and show_labels
+    label.new(
+         x          = bar_index,
+         y          = low - atr_offset,
+         text       = "LONG\nEntry : " + str.tostring(close,   format.mintick)
+                    + "\nSL    : "     + str.tostring(long_sl, format.mintick),
+         color      = color.new(color.green, 5),
+         textcolor  = color.white,
+         style      = label.style_label_up,
+         size       = size.normal,
+         force_overlay = true
+    )
+
+// ═══════════════════════════════════════════════
+//  ALERTS
+// ═══════════════════════════════════════════════
+alertcondition(short_signal, "SHORT - Song Kiem", "SHORT {{ticker}} | {{interval}} | Entry: {{close}}")
+alertcondition(long_signal,  "LONG  - Song Kiem", "LONG  {{ticker}} | {{interval}} | Entry: {{close}}")
