@@ -37,11 +37,11 @@ float curr_body    = math.abs(close    - open)
 //  SHORT SIGNAL
 // ═══════════════════════════════════════════════
 // Điều kiện 1: Close nến XANH (nến 1) chạm hoặc vượt BB upper tại thời điểm đó
-bool short_bb      = prev_bullish and close[1] >= bb_upper[1]
+bool short_bb      = prev_bullish and high[1] >= bb_upper[1]
 // Điều kiện 2: Nến 2 đỏ, thân >= sk_ratio% thân nến 1
 bool short_pattern = not curr_bullish and prev_body > 0 and curr_body >= sk_ratio * prev_body
 // Điều kiện 3: Vol nến đỏ > Vol nến xanh
-bool short_vol     = volume > volume[1]
+bool short_vol     = volume[1] > volume
 
 bool short_signal  = short_bb and short_pattern and short_vol
 
@@ -49,11 +49,11 @@ bool short_signal  = short_bb and short_pattern and short_vol
 //  LONG SIGNAL
 // ═══════════════════════════════════════════════
 // Điều kiện 1: Close nến ĐỎ (nến 1) chạm hoặc xuống dưới BB lower tại thời điểm đó
-bool long_bb       = not prev_bullish and close[1] <= bb_lower[1]
+bool long_bb       = not prev_bullish and low[1] <= bb_lower[1]
 // Điều kiện 2: Nến 2 xanh, thân >= sk_ratio% thân nến 1
 bool long_pattern  = curr_bullish and prev_body > 0 and curr_body >= sk_ratio * prev_body
 // Điều kiện 3: Vol nến xanh > Vol nến đỏ
-bool long_vol      = volume > volume[1]
+bool long_vol      = volume[1] > volume
 
 bool long_signal   = long_bb and long_pattern and long_vol
 

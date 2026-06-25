@@ -4,7 +4,6 @@ Binance Futures Song Kiem Signal Bot
 Chỉnh TELEGRAM_TOKEN, TELEGRAM_CHAT_ID trước khi chạy.
 """
 import asyncio
-import json
 import logging
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -12,7 +11,6 @@ from datetime import datetime, timedelta
 from typing import Awaitable, Callable, Literal, TypedDict
 
 import aiohttp
-import websockets
 
 # ═══════════════════════════════════════════════
 #  CẤU HÌNH — chỉnh ở đây
@@ -108,9 +106,9 @@ def detect_signal(symbol: str, candles: list[dict]) -> Signal | None:
     curr_bullish = curr["close"] > curr["open"]
 
     # ── SHORT ─────────────────────────────────
-    short_bb      = prev_bullish and prev["close"] >= ind_prev["bb_upper"]
+    short_bb      = prev_bullish and prev["high"] >= ind_prev["bb_upper"]
     short_pattern = not curr_bullish and curr_body >= SONG_KIEM_RATIO * prev_body
-    short_vol     = curr["volume"] > prev["volume"]
+    short_vol     = prev["volume"] > curr["volume"]
 
     if short_bb and short_pattern and short_vol:
         sl = max(prev["high"], curr["high"])
@@ -121,9 +119,9 @@ def detect_signal(symbol: str, candles: list[dict]) -> Signal | None:
         logger.debug(f"{symbol} SHORT gần đủ: BB+Pattern OK, Vol chưa đủ")
 
     # ── LONG ──────────────────────────────────
-    long_bb      = not prev_bullish and prev["close"] <= ind_prev["bb_lower"]
+    long_bb      = not prev_bullish and prev["low"] <= ind_prev["bb_lower"]
     long_pattern = curr_bullish and curr_body >= SONG_KIEM_RATIO * prev_body
-    long_vol     = curr["volume"] > prev["volume"]
+    long_vol     = prev["volume"] > curr["volume"]
 
     if long_bb and long_pattern and long_vol:
         sl = min(prev["low"], curr["low"])
@@ -149,12 +147,12 @@ def _fmt(price: float) -> str:
 def _build_message(signal: Signal) -> str:
     if signal.direction == "SHORT":
         header    = "🔴 SHORT SIGNAL"
-        bb_label  = "Close nến xanh chạm Bollinger Upper"
-        vol_label = "Vol nến đỏ > Vol nến xanh"
+        bb_label  = "High nến xanh chạm Bollinger Upper"
+        vol_label = "Vol nến xanh > Vol nến đỏ"
     else:
         header    = "🟢 LONG SIGNAL"
-        bb_label  = "Close nến đỏ chạm Bollinger Lower"
-        vol_label = "Vol nến xanh > Vol nến đỏ"
+        bb_label  = "Low nến đỏ chạm Bollinger Lower"
+        vol_label = "Vol nến đỏ > Vol nến xanh"
 
     return (
         f"*{header}*\n\n"
@@ -193,9 +191,7 @@ async def send_signal(signal: Signal) -> None:
 # ═══════════════════════════════════════════════
 #  BINANCE CLIENT
 # ═══════════════════════════════════════════════
-_FUTURES_REST   = "https://fapi.binance.com"
-_FUTURES_WS     = "wss://fstream.binance.com/stream"
-_RECONNECT_DELAY = 5
+_FUTURES_REST = "https://fapi.binance.com"
 
 
 async def fetch_top_symbols(n: int = 50) -> list[str]:
@@ -224,28 +220,44 @@ class BinanceClient:
         self.interval     = interval
         self.buffer_size  = buffer_size
         self.candles: dict[str, deque] = defaultdict(lambda: deque(maxlen=buffer_size))
-        self._queue: asyncio.Queue     = asyncio.Queue()
-        self._reconnect   = 0
+        self._last_close: dict[str, int] = {}   # symbol -> close_time_ms đã xử lý
+        self._interval_ms = self._parse_interval_ms(interval)
+
+    @staticmethod
+    def _parse_interval_ms(interval: str) -> int:
+        units = {"m": 60, "h": 3600, "d": 86400}
+        return int(interval[:-1]) * units[interval[-1]] * 1000
+
+    def _next_close_in_seconds(self) -> float:
+        """Số giây đến khi nến tiếp theo đóng cửa (+8s buffer)."""
+        now_ms  = int(datetime.now().timestamp() * 1000)
+        next_ms = ((now_ms // self._interval_ms) + 1) * self._interval_ms + 8000
+        return max(1.0, (next_ms - now_ms) / 1000)
 
     async def _fetch_initial(self) -> None:
         logger.info(f"Nạp lịch sử {len(self.symbols)} coin...")
         ok, fail = 0, []
-        async with aiohttp.ClientSession() as session:
+        connector = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(connector=connector) as session:
             for sym in self.symbols:
                 try:
                     params = {"symbol": sym, "interval": self.interval, "limit": self.buffer_size}
                     async with session.get(
                         f"{_FUTURES_REST}/fapi/v1/klines", params=params,
-                        timeout=aiohttp.ClientTimeout(total=10),
+                        timeout=aiohttp.ClientTimeout(total=15),
                     ) as resp:
                         if resp.status != 200:
                             raise ValueError(f"HTTP {resp.status}")
-                        for k in (await resp.json())[:-1]:  # bỏ nến chưa đóng
+                        rows = await resp.json()
+                        for k in rows[:-1]:   # bỏ nến đang mở
                             self.candles[sym].append({
                                 "open": float(k[1]), "high": float(k[2]),
                                 "low":  float(k[3]), "close": float(k[4]),
                                 "volume": float(k[5]),
                             })
+                        # Ghi nhớ close_time của nến cuối để tránh xử lý lại
+                        if rows:
+                            self._last_close[sym] = int(rows[-2][6])
                     logger.info(f"  ✓ {sym}: {len(self.candles[sym])} nến")
                     ok += 1
                 except Exception as e:
@@ -254,60 +266,64 @@ class BinanceClient:
         logger.info(f"Nạp xong {ok}/{len(self.symbols)}" +
                     (f" | Lỗi: {', '.join(fail)}" if fail else ""))
 
-    def _on_kline(self, data: dict) -> None:
-        k = data["k"]
-        if not k["x"]:   # chỉ xử lý nến đã đóng
-            return
-        sym = k["s"]
-        self.candles[sym].append({
-            "open": float(k["o"]), "high": float(k["h"]),
-            "low":  float(k["l"]), "close": float(k["c"]),
-            "volume": float(k["v"]),
-        })
-        self._candle_count = getattr(self, "_candle_count", 0) + 1
-        if self._candle_count % 10 == 0:
-            logger.info(f"Nến đóng #{self._candle_count}: {sym} | {float(k['c']):.4f}")
-        if len(self.candles[sym]) >= 55:
-            self._queue.put_nowait((sym, list(self.candles[sym])))
-
-    async def _ws_loop(self) -> None:
-        streams = "/".join(f"{s.lower()}@kline_{self.interval}" for s in self.symbols)
-        url     = f"{_FUTURES_WS}?streams={streams}"
-        while True:
-            try:
-                logger.info("Kết nối WebSocket Binance Futures...")
-                async with websockets.connect(url, ping_interval=20, ping_timeout=15) as ws:
-                    self._reconnect = 0
-                    logger.info(f"WebSocket OK — {len(self.symbols)} stream")
-                    async for raw in ws:
-                        msg = json.loads(raw)
-                        if "data" in msg:
-                            self._on_kline(msg["data"])
-            except websockets.ConnectionClosed as e:
-                self._reconnect += 1
-                logger.warning(f"WS đóng (#{self._reconnect}): {e} — retry {_RECONNECT_DELAY}s")
-            except Exception as e:
-                self._reconnect += 1
-                logger.error(f"WS lỗi (#{self._reconnect}): {e} — retry {_RECONNECT_DELAY}s")
-            await asyncio.sleep(_RECONNECT_DELAY)
-
-    async def _process_queue(self, cb: Callable[[str, list], Awaitable[None]]) -> None:
-        while True:
-            sym, candles = await self._queue.get()
-            try:
-                await cb(sym, candles)
-            except Exception as e:
-                logger.error(f"Lỗi xử lý {sym}: {e}", exc_info=True)
-
-    async def _heartbeat(self) -> None:
-        while True:
-            await asyncio.sleep(900)  # 15 phút
-            total = sum(len(v) for v in self.candles.values())
-            logger.info(f"[HEARTBEAT] Bot đang chạy — {len(self.symbols)} cặp | tổng {total} nến trong buffer")
+    async def _poll_all(self, cb: Callable[[str, list], Awaitable[None]]) -> None:
+        """Fetch 2 nến gần nhất của mỗi symbol, xử lý nến vừa đóng nếu mới."""
+        closed = 0
+        connector = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            for sym in self.symbols:
+                try:
+                    params = {"symbol": sym, "interval": self.interval, "limit": 2}
+                    async with session.get(
+                        f"{_FUTURES_REST}/fapi/v1/klines", params=params,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status != 200:
+                            continue
+                        rows = await resp.json()
+                    if len(rows) < 2:
+                        continue
+                    k          = rows[0]               # nến đã đóng
+                    close_time = int(k[6])
+                    if self._last_close.get(sym) == close_time:
+                        continue                        # đã xử lý rồi
+                    self._last_close[sym] = close_time
+                    self.candles[sym].append({
+                        "open": float(k[1]), "high": float(k[2]),
+                        "low":  float(k[3]), "close": float(k[4]),
+                        "volume": float(k[5]),
+                    })
+                    closed += 1
+                    if len(self.candles[sym]) >= 55:
+                        await cb(sym, list(self.candles[sym]))
+                except Exception as e:
+                    logger.error(f"Poll lỗi {sym}: {e}")
+        if closed:
+            logger.info(f"Xử lý {closed} nến đóng mới")
 
     async def run(self, cb: Callable[[str, list], Awaitable[None]]) -> None:
         await self._fetch_initial()
-        await asyncio.gather(self._ws_loop(), self._process_queue(cb), self._heartbeat())
+        cycle = 0
+        while True:
+            wait = self._next_close_in_seconds()
+            logger.info(f"Chờ {wait:.0f}s đến nến M15 tiếp theo đóng...")
+            await asyncio.sleep(wait)
+            cycle += 1
+            logger.info(f"[Chu kỳ #{cycle}] Đang kiểm tra nến mới...")
+            await self._poll_all(cb)
+
+            # Retry sau 10s cho các coin bị miss
+            missed = [s for s in self.symbols if s not in self._last_close
+                      or self._last_close[s] < self._expected_close_ms()]
+            if missed:
+                logger.info(f"Retry {len(missed)} coin bị miss sau 10s...")
+                await asyncio.sleep(10)
+                await self._poll_all(cb)
+
+    def _expected_close_ms(self) -> int:
+        """Close time ms của nến vừa đóng."""
+        now_ms = int(datetime.now().timestamp() * 1000)
+        return (now_ms // self._interval_ms) * self._interval_ms - 1
 
 # ═══════════════════════════════════════════════
 #  SCANNER
