@@ -18,6 +18,12 @@ cfg           = None
 open_trades   = {}   # ticker -> trade dict (lệnh đang chạy)
 closed_trades = []   # list (lệnh đã đóng trong ngày)
 
+# --- BOT PHỤ (token fix cứng) ---
+# Điền bot token và chat ID nhóm muốn nhận tín hiệu
+# Để trống ("") nếu không dùng
+EXTRA_BOT_TOKEN   = "8896133750:AAHvkuC3JQN2xoIWcDjm0iO4hSTZ7YukIbg"          # vd: "7123456789:AAF..."
+EXTRA_BOT_CHAT_ID = "-1003844825335"          # vd: "-1001234567890"
+
 TRADES_FILE    = "trades.json"
 YESTERDAY_FILE = "trades_yesterday.json"
 VOLUME         = 0.1   # Khối lượng giao dịch mặc định (lots)
@@ -256,7 +262,7 @@ def format_interval(tf: str) -> str:
 
 
 # --- ĐỊNH DẠNG TIN NHẮN TÍN HIỆU ---
-def format_message(data: dict) -> str:
+def format_message(data: dict, brand: str = "RICH FOUNDATION") -> str:
     signal    = data.get("signal",    "")
     ticker    = data.get("ticker",    "N/A")
     close     = data.get("close",     "N/A")
@@ -303,7 +309,7 @@ def format_message(data: dict) -> str:
 
     now   = datetime.now().strftime("%H:%M  %d/%m/%Y")
     lines = [
-        "<b>TÍN HIỆU RICH FOUNDATION</b>",
+        f"<b>TÍN HIỆU {brand}</b>",
         f"{icon} <b>{action}</b> | <b>{ticker}</b>",
         f" ⏱ Khung: {format_interval(interval)}",
     ]
@@ -330,7 +336,7 @@ def format_message(data: dict) -> str:
 
 
 # --- ĐỊNH DẠNG TIN NHẮN TỔNG KẾT (dùng chung) ---
-def _build_summary(title: str, trades: list, open_tds: dict | None = None) -> str:
+def _build_summary(title: str, trades: list, open_tds: dict | None = None, brand: str = "RICH FOUNDATION") -> str:
     wins       = sum(1 for t in trades if t["result"] in ("TP1", "TP2", "TP3", "TP4", "TP5"))
     losses     = sum(1 for t in trades if t["result"] == "SL")
     still_open = len(open_tds) if open_tds else 0
@@ -350,7 +356,7 @@ def _build_summary(title: str, trades: list, open_tds: dict | None = None) -> st
     net_m_str = f"+${net_money:.2f}" if net_money >= 0 else f"-${abs(net_money):.2f}"
 
     lines = [
-        "🔔 <b>RICH FOUNDATION</b> 🔔",
+        f"🔔 <b>{brand}</b> 🔔",
         f"📊 <b>{title}</b>",
         "━━━━━━━━━━━━━━━━━━━━━━",
         f"📥 Tổng lệnh: <b>{total}</b>  |  KL: {VOLUME} lot",
@@ -394,12 +400,12 @@ def _build_summary(title: str, trades: list, open_tds: dict | None = None) -> st
     return "\n".join(lines)
 
 
-def format_daily_summary() -> str:
+def format_daily_summary(brand: str = "RICH FOUNDATION") -> str:
     today = datetime.now().strftime("%d/%m/%Y")
-    return _build_summary(f"TỔNG KẾT NGÀY {today}", list(closed_trades), dict(open_trades))
+    return _build_summary(f"TỔNG KẾT NGÀY {today}", list(closed_trades), dict(open_trades), brand=brand)
 
 
-def format_morning_summary() -> str | None:
+def format_morning_summary(brand: str = "RICH FOUNDATION") -> str | None:
     """Tổng kết ngày hôm qua — gửi đầu buổi sáng."""
     if not os.path.exists(YESTERDAY_FILE):
         return None
@@ -416,10 +422,10 @@ def format_morning_summary() -> str | None:
         return None
     if not trades:
         return None
-    return _build_summary(f"TỔNG KẾT NGÀY {label_date}", trades)
+    return _build_summary(f"TỔNG KẾT NGÀY {label_date}", trades, brand=brand)
 
 
-def format_partial_summary(from_h: int, to_h: int, period_name: str) -> str:
+def format_partial_summary(from_h: int, to_h: int, period_name: str, brand: str = "RICH FOUNDATION") -> str:
     """Tổng kết theo khung giờ trong ngày (lọc theo giờ đóng lệnh)."""
     trades = [
         t for t in closed_trades
@@ -427,7 +433,7 @@ def format_partial_summary(from_h: int, to_h: int, period_name: str) -> str:
         and from_h <= datetime.fromisoformat(t["exit_time"]).hour < to_h
     ]
     today = datetime.now().strftime("%d/%m/%Y")
-    return _build_summary(f"THỐNG KÊ {period_name} {today}", trades)
+    return _build_summary(f"THỐNG KÊ {period_name} {today}", trades, brand=brand)
 
 
 # --- GỬI TỚI TẤT CẢ NHÓM ---
@@ -495,6 +501,9 @@ async def notification_scheduler():
             if msg:
                 print("\n🌅 Đang gửi tổng kết hôm qua...")
                 await send_all(msg)
+                msg_extra = format_morning_summary(brand=EXTRA_BOT_BRAND)
+                if msg_extra:
+                    threading.Thread(target=send_via_extra_bot, args=(msg_extra,), daemon=True).start()
             else:
                 print("\n🌅 Không có dữ liệu hôm qua, bỏ qua.")
 
@@ -502,6 +511,7 @@ async def notification_scheduler():
             _, _, _, from_h, to_h, period_name = next_item
             print(f"\n📊 Đang gửi thống kê {period_name}...")
             await send_all(format_partial_summary(from_h, to_h, period_name))
+            threading.Thread(target=send_via_extra_bot, args=(format_partial_summary(from_h, to_h, period_name, brand=EXTRA_BOT_BRAND),), daemon=True).start()
 
         elif ntype == "reset":
             # 23:55: lưu hôm nay làm hôm qua + reset (không gửi thông báo, sáng mai sẽ gửi)
@@ -513,6 +523,26 @@ async def notification_scheduler():
                 os.remove(TRADES_FILE)
 
         await asyncio.sleep(61)  # tránh kích hoạt 2 lần trong cùng phút
+
+
+# --- GỬI QUA BOT PHỤ (Bot API) ---
+EXTRA_BOT_BRAND = "GROWTH ASSET TRADING"
+
+def send_via_extra_bot(message: str):
+    if not EXTRA_BOT_TOKEN or not EXTRA_BOT_CHAT_ID:
+        return
+    try:
+        url  = f"https://api.telegram.org/bot{EXTRA_BOT_TOKEN}/sendMessage"
+        body = json.dumps({
+            "chat_id":    EXTRA_BOT_CHAT_ID,
+            "text":       message,
+            "parse_mode": "HTML",
+        }).encode("utf-8")
+        req = _urllib_req.Request(url, data=body, headers={"Content-Type": "application/json"})
+        with _urllib_req.urlopen(req, timeout=10) as resp:
+            print(f"  🤖 Bot phụ: gửi OK ({resp.status})")
+    except Exception as e:
+        print(f"  🤖 Bot phụ lỗi: {type(e).__name__}: {e}")
 
 
 # --- FORWARD TÍN HIỆU SANG DJANGO WEB ---
@@ -563,7 +593,10 @@ def webhook(token):
     elif "LONG" in sig_upper or "SHORT" in sig_upper:
         record_trade_open(data)
 
-    asyncio.run_coroutine_threadsafe(send_all(format_message(data)), loop)
+    msg       = format_message(data)
+    msg_extra = format_message(data, brand=EXTRA_BOT_BRAND)
+    asyncio.run_coroutine_threadsafe(send_all(msg), loop)
+    threading.Thread(target=send_via_extra_bot, args=(msg_extra,), daemon=True).start()
     threading.Thread(target=forward_to_web, args=(data,), daemon=True).start()
     return jsonify({"status": "ok", "signal": signal}), 200
 
