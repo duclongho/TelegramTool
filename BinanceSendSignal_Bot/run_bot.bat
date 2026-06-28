@@ -38,7 +38,7 @@ echo.
 :run
 echo [%time%] Khoi dong bot...
 echo.
-python songkiem_bot.py
+python longH4Future.py
 echo.
 echo [%time%] Bot da dung (exit code: %errorlevel%)
 
