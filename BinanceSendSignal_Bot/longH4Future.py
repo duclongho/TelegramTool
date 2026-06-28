@@ -26,14 +26,14 @@ SYMBOLS = [                # Dùng khi AUTO_TOP_SYMBOLS = False
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
 ]
 
-INTERVAL         = "15m"
-INTERVAL_DISPLAY = "M15"
+INTERVAL         = "4h"
+INTERVAL_DISPLAY = "H4"
 CANDLE_BUFFER    = 150
 
 BB_PERIOD = 20
 BB_STD    = 2.0
 
-SONG_KIEM_RATIO        = 0.90  # Thân nến 2 >= 90% thân nến 1
+VOL_SIMILARITY_RATIO   = 0.95  # Vol nến 2 / Vol nến 1 >= 95% (gần bằng nhau)
 ALERT_COOLDOWN_MINUTES = 30    # Cooldown giữa 2 tín hiệu cùng coin/chiều
 
 # ═══════════════════════════════════════════════
@@ -76,7 +76,7 @@ def compute_indicators(candles: list[dict]) -> Indicators:
 @dataclass
 class Signal:
     symbol:    str
-    direction: Literal["LONG", "SHORT"]
+    direction: Literal["LONG"]
     price:     float
     sl:        float
     ind:       Indicators
@@ -86,52 +86,29 @@ def detect_signal(symbol: str, candles: list[dict]) -> Signal | None:
     if len(candles) < BB_PERIOD + 5:
         return None
 
-    # BB tại nến 1 — khớp bb_upper[1] trong Pine Script
-    ind_prev = compute_indicators(candles[:-1])
-    # BB tại nến 2 — khớp bb_upper trong Pine Script
-    ind_curr = compute_indicators(candles)
-
-    if ind_curr["bb_upper"] == 0.0:
+    ind = compute_indicators(candles)
+    if ind["bb_middle"] == 0.0:
         return None
 
-    prev = candles[-2]   # Nến 1 (BB-touch)
-    curr = candles[-1]   # Nến 2 (xác nhận)
+    prev = candles[-2]   # Nến 1
+    curr = candles[-1]   # Nến 2
 
-    prev_body = abs(prev["close"] - prev["open"])
-    curr_body = abs(curr["close"] - curr["open"])
-    if prev_body == 0:
+    # Cả hai nến phải là nến tăng
+    if not (prev["close"] > prev["open"] and curr["close"] > curr["open"]):
         return None
 
-    prev_bullish = prev["close"] > prev["open"]
-    curr_bullish = curr["close"] > curr["open"]
+    # Cả hai mở cửa dưới BB giữa
+    if not (prev["open"] < ind["bb_middle"] and curr["open"] < ind["bb_middle"]):
+        return None
 
-    # ── SHORT ─────────────────────────────────
-    short_bb      = prev_bullish and prev["high"] >= ind_prev["bb_upper"]
-    short_pattern = not curr_bullish and curr_body >= SONG_KIEM_RATIO * prev_body
-    short_vol     = prev["volume"] > curr["volume"]
+    # Khối lượng hai nến gần bằng nhau
+    vol_ratio = min(prev["volume"], curr["volume"]) / max(prev["volume"], curr["volume"])
+    if vol_ratio < VOL_SIMILARITY_RATIO:
+        return None
 
-    if short_bb and short_pattern and short_vol:
-        sl = max(prev["high"], curr["high"])
-        logger.info(f"{symbol} SHORT | Entry={curr['close']:.4f}  SL={sl:.4f}")
-        return Signal(symbol=symbol, direction="SHORT", price=curr["close"], sl=sl, ind=ind_curr)
-
-    if short_bb and short_pattern:
-        logger.debug(f"{symbol} SHORT gần đủ: BB+Pattern OK, Vol chưa đủ")
-
-    # ── LONG ──────────────────────────────────
-    long_bb      = not prev_bullish and prev["low"] <= ind_prev["bb_lower"]
-    long_pattern = curr_bullish and curr_body >= SONG_KIEM_RATIO * prev_body
-    long_vol     = prev["volume"] > curr["volume"]
-
-    if long_bb and long_pattern and long_vol:
-        sl = min(prev["low"], curr["low"])
-        logger.info(f"{symbol} LONG  | Entry={curr['close']:.4f}  SL={sl:.4f}")
-        return Signal(symbol=symbol, direction="LONG", price=curr["close"], sl=sl, ind=ind_curr)
-
-    if long_bb and long_pattern:
-        logger.debug(f"{symbol} LONG gần đủ: BB+Pattern OK, Vol chưa đủ")
-
-    return None
+    sl = min(prev["low"], curr["low"])
+    logger.info(f"{symbol} LONG | Entry={curr['close']:.4f}  SL={sl:.4f}  VolRatio={vol_ratio:.2f}")
+    return Signal(symbol=symbol, direction="LONG", price=curr["close"], sl=sl, ind=ind)
 
 # ═══════════════════════════════════════════════
 #  TELEGRAM
@@ -145,23 +122,14 @@ def _fmt(price: float) -> str:
 
 
 def _build_message(signal: Signal) -> str:
-    if signal.direction == "SHORT":
-        header    = "🔴 SHORT SIGNAL"
-        bb_label  = "High nến xanh chạm Bollinger Upper"
-        vol_label = "Vol nến xanh > Vol nến đỏ"
-    else:
-        header    = "🟢 LONG SIGNAL"
-        bb_label  = "Low nến đỏ chạm Bollinger Lower"
-        vol_label = "Vol nến đỏ > Vol nến xanh"
-
     return (
-        f"*{header}*\n\n"
+        f"*🟢 LONG SIGNAL*\n\n"
         f"Coin: `{signal.symbol}`\n"
         f"Timeframe: {INTERVAL_DISPLAY}\n\n"
         f"Điều kiện:\n"
-        f"✓ {bb_label}\n"
-        f"✓ Xuất hiện cặp nến Song Kiếm\n"
-        f"✓ {vol_label}\n\n"
+        f"✓ Hai nến tăng liên tiếp\n"
+        f"✓ Cả hai nến đều ở BB dưới đến BB giữa\n"
+        f"✓ Khối lượng hai nến gần bằng nhau\n\n"
         f"Entry: `{_fmt(signal.price)}`\n"
         f"SL: `{_fmt(signal.sl)}`"
     )
@@ -228,11 +196,23 @@ class BinanceClient:
         units = {"m": 60, "h": 3600, "d": 86400}
         return int(interval[:-1]) * units[interval[-1]] * 1000
 
-    def _next_close_in_seconds(self) -> float:
-        """Số giây đến khi nến tiếp theo đóng cửa (+8s buffer)."""
-        now_ms  = int(datetime.now().timestamp() * 1000)
-        next_ms = ((now_ms // self._interval_ms) + 1) * self._interval_ms + 8000
-        return max(1.0, (next_ms - now_ms) / 1000)
+    async def _fetch_next_close_ms(self) -> int:
+        """Lấy closeTime của nến đang mở từ Binance (chính xác nhất)."""
+        sym = self.symbols[0]
+        try:
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                params = {"symbol": sym, "interval": self.interval, "limit": 1}
+                async with session.get(
+                    f"{_FUTURES_REST}/fapi/v1/klines", params=params,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    rows = await resp.json()
+            return int(rows[0][6])  # closeTime của nến đang mở
+        except Exception as e:
+            logger.error(f"Không lấy được closeTime từ Binance: {e} — dùng tính toán local")
+            now_ms = int(datetime.now().timestamp() * 1000)
+            return ((now_ms // self._interval_ms) + 1) * self._interval_ms - 1
 
     async def _fetch_initial(self) -> None:
         logger.info(f"Nạp lịch sử {len(self.symbols)} coin...")
@@ -305,8 +285,11 @@ class BinanceClient:
         await self._fetch_initial()
         cycle = 0
         while True:
-            wait = self._next_close_in_seconds()
-            logger.info(f"Chờ {wait:.0f}s đến nến M15 tiếp theo đóng...")
+            next_close_ms = await self._fetch_next_close_ms()
+            now_ms = int(datetime.now().timestamp() * 1000)
+            wait   = max(1.0, (next_close_ms - now_ms + 8000) / 1000)
+            close_dt = datetime.utcfromtimestamp(next_close_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+            logger.info(f"Chờ {wait:.0f}s — nến H4 đóng lúc {close_dt} UTC")
             await asyncio.sleep(wait)
             cycle += 1
             logger.info(f"[Chu kỳ #{cycle}] Đang kiểm tra nến mới...")
@@ -384,7 +367,7 @@ def _banner() -> None:
         logger.info(f"  Symbol    : Thủ công {len(SYMBOLS)} cặp")
     logger.info(f"  Timeframe : {INTERVAL_DISPLAY}")
     logger.info(f"  BB        : period={BB_PERIOD}  std={BB_STD}")
-    logger.info(f"  SK ratio  : {SONG_KIEM_RATIO}")
+    logger.info(f"  Vol sim   : {VOL_SIMILARITY_RATIO}")
     logger.info(f"  Cooldown  : {ALERT_COOLDOWN_MINUTES} phút")
     logger.info("=" * 50)
 
@@ -400,7 +383,7 @@ async def _send_startup_message() -> None:
         f"Timeframe: `{INTERVAL_DISPLAY}`\n"
         f"Theo dõi: `{'Top ' + str(TOP_SYMBOLS_COUNT) + ' coin' if AUTO_TOP_SYMBOLS else str(len(SYMBOLS)) + ' coin'}`\n"
         f"Cooldown: `{ALERT_COOLDOWN_MINUTES} phút`\n\n"
-        "Đang chờ tín hiệu Song Kiếm..."
+        "Đang chờ tín hiệu LONG..."
     )
     url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
