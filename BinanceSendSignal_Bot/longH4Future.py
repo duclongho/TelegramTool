@@ -19,7 +19,7 @@ TELEGRAM_TOKEN   = "8641278115:AAEB08VXrX5YJl_2zzM_SFF4JRdEwIfAj-s"   # Token bo
 TELEGRAM_CHAT_ID = "-1004448248877"   # Chat ID nhận tín hiệu
 
 AUTO_TOP_SYMBOLS  = True   # True = tự động lấy top coin theo khối lượng
-TOP_SYMBOLS_COUNT = 50     # Số lượng coin theo dõi
+TOP_SYMBOLS_COUNT = 100     # Số lượng coin theo dõi
 
 SYMBOLS = [                # Dùng khi AUTO_TOP_SYMBOLS = False
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
@@ -33,7 +33,8 @@ CANDLE_BUFFER    = 150
 BB_PERIOD = 20
 BB_STD    = 2.0
 
-VOL_SIMILARITY_RATIO   = 0.95  # Vol nến 2 / Vol nến 1 >= 95% (gần bằng nhau)
+VOL_RATIO_MIN          = 0.95  # Vol nến 2 (sau) tối thiểu 95% vol nến 1 (trước)
+VOL_RATIO_MAX          = 1.15  # Vol nến 2 (sau) tối đa 115% vol nến 1 (trước)
 ALERT_COOLDOWN_MINUTES = 30    # Cooldown giữa 2 tín hiệu cùng coin/chiều
 
 # ═══════════════════════════════════════════════
@@ -101,9 +102,9 @@ def detect_signal(symbol: str, candles: list[dict]) -> Signal | None:
     if not (prev["open"] < ind["bb_middle"] and curr["open"] < ind["bb_middle"]):
         return None
 
-    # Khối lượng hai nến gần bằng nhau
-    vol_ratio = min(prev["volume"], curr["volume"]) / max(prev["volume"], curr["volume"])
-    if vol_ratio < VOL_SIMILARITY_RATIO:
+    # Vol nến sau phải bằng 95% đến 115% vol nến trước
+    vol_ratio = curr["volume"] / prev["volume"]
+    if not (VOL_RATIO_MIN <= vol_ratio <= VOL_RATIO_MAX):
         return None
 
     sl = min(prev["low"], curr["low"])
@@ -367,7 +368,7 @@ def _banner() -> None:
         logger.info(f"  Symbol    : Thủ công {len(SYMBOLS)} cặp")
     logger.info(f"  Timeframe : {INTERVAL_DISPLAY}")
     logger.info(f"  BB        : period={BB_PERIOD}  std={BB_STD}")
-    logger.info(f"  Vol sim   : {VOL_SIMILARITY_RATIO}")
+    logger.info(f"  Vol ratio : {VOL_RATIO_MIN} - {VOL_RATIO_MAX}")
     logger.info(f"  Cooldown  : {ALERT_COOLDOWN_MINUTES} phút")
     logger.info("=" * 50)
 

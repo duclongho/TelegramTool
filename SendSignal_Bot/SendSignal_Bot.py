@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import ssl
 import pandas as pd
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
@@ -539,7 +540,10 @@ def send_via_extra_bot(message: str):
             "parse_mode": "HTML",
         }).encode("utf-8")
         req = _urllib_req.Request(url, data=body, headers={"Content-Type": "application/json"})
-        with _urllib_req.urlopen(req, timeout=10) as resp:
+        _ctx = ssl.create_default_context()
+        _ctx.check_hostname = False
+        _ctx.verify_mode = ssl.CERT_NONE
+        with _urllib_req.urlopen(req, timeout=10, context=_ctx) as resp:
             print(f"  🤖 Bot phụ: gửi OK ({resp.status})")
     except Exception as e:
         print(f"  🤖 Bot phụ lỗi: {type(e).__name__}: {e}")
