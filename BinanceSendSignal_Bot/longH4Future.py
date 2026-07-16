@@ -16,8 +16,8 @@ import aiohttp
 #  CẤU HÌNH — chỉnh ở đây
 # ═══════════════════════════════════════════════
 TELEGRAM_TOKEN      = "8641278115:AAEB08VXrX5YJl_2zzM_SFF4JRdEwIfAj-s"   # Token bot Telegram
-TELEGRAM_CHAT_ID    = "-1004448248877"   # Chat ID nhận tín hiệu LONG (H4)
-TELEGRAM_CHAT_ID_H1 = "-1004340326145"   # Chat ID nhận tín hiệu Marubozu (H1)
+TELEGRAM_CHAT_ID    = "-1004448248877"   # Chat ID nhận LONG SIGNAL (H1) + SHORT SIGNAL (H1) — điều kiện mới, chạm BB
+TELEGRAM_CHAT_ID_H1 = "-1004340326145"   # Chat ID nhận tín hiệu SHORT (H1) cũ — giữ nguyên điều kiện + TP/SL cũ
 
 AUTO_TOP_SYMBOLS  = True   # True = tự động lấy top coin theo khối lượng
 TOP_SYMBOLS_COUNT = 100     # Số lượng coin theo dõi
@@ -27,27 +27,28 @@ SYMBOLS = [                # Dùng khi AUTO_TOP_SYMBOLS = False
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
 ]
 
-INTERVAL         = "4h"
-INTERVAL_DISPLAY = "H4"
-CANDLE_BUFFER    = 150
+CANDLE_BUFFER = 150
 
-INTERVAL_H1         = "1h"   # Timeframe cho tín hiệu Marubozu
+INTERVAL_H1         = "1h"   # Timeframe dùng chung cho tất cả các kèo
 INTERVAL_H1_DISPLAY = "H1"
-H1_POLL_STAGGER_SEC = 30     # Trễ thêm N giây khi poll H1 để tránh trùng đợt poll H4 (mỗi 4h)
+H1_POLL_STAGGER_SEC = 30     # Trễ thêm N giây khi poll các scanner phụ để tránh trùng đợt poll
 
 BB_PERIOD = 20
 BB_STD    = 2.0
 
+BAND_TOUCH_TOLERANCE = 0.05   # 5% - coi là "bám sát" đường BB giữa (kèo Short H1 cũ)
+VOL_RATIO_MIN        = 0.95   # Vol nến 2 (sau) tối thiểu 95% vol nến 1 (trước) (kèo Short H1 cũ)
+VOL_RATIO_MAX        = 1.15   # Vol nến 2 (sau) tối đa 115% vol nến 1 (trước) (kèo Short H1 cũ)
+
 MIN_CANDLES_FOR_SIGNAL = BB_PERIOD + 5  # Số nến tối thiểu cần có trước khi bắt đầu xét tín hiệu
 
-BAND_TOUCH_TOLERANCE   = 0.05  # 5% - coi là "bám sát" đường BB (giữa/trên)
-
-VOL_RATIO_MIN          = 0.95  # Vol nến 2 (sau) tối thiểu 95% vol nến 1 (trước)
-VOL_RATIO_MAX          = 1.15  # Vol nến 2 (sau) tối đa 115% vol nến 1 (trước)
 ALERT_COOLDOWN_MINUTES = 30    # Cooldown giữa 2 tín hiệu cùng coin/chiều
 
-MARUBOZU_UPPER_WICK_RATIO = 0.05  # Râu trên tối đa 5% so với thân nến (coi là Marubozu)
-MARUBOZU_LOWER_WICK_RATIO = 0.30  # Râu dưới tối đa 30% so với thân nến (coi là Marubozu)
+NEW_TP_PCT = 0.025   # Chốt lời cố định 2.5% (kèo Long/Short H1 mới — điều kiện chạm BB)
+NEW_SL_PCT = 0.01    # Cắt lỗ cố định 1% (kèo Long/Short H1 mới)
+
+LEGACY_TP_PCT = 0.04   # Chốt lời cố định 4% (kèo Short H1 cũ)
+LEGACY_SL_PCT = 0.02   # Cắt lỗ cố định 2% (kèo Short H1 cũ)
 
 # ═══════════════════════════════════════════════
 #  LOGGING
@@ -94,18 +95,71 @@ def _near_band(price: float, band: float, tolerance: float = BAND_TOUCH_TOLERANC
 @dataclass
 class Signal:
     symbol:    str
-    direction: Literal["LONG"]
+    direction: Literal["LONG", "SHORT"]
     price:     float
     sl:        float
     ind:       Indicators
 
 
-def detect_signal(symbol: str, candles: list[dict]) -> Signal | None:
+@dataclass
+class Position:
+    """Lệnh đang mở, chờ chạm TP hoặc SL."""
+    symbol:    str
+    direction: Literal["LONG", "SHORT"]
+    entry:     float
+    tp:        float
+    sl:        float
+    opened_at: datetime
+
+
+def detect_signal(symbol: str, candles: list[dict],
+                   direction: Literal["LONG", "SHORT"] = "LONG") -> Signal | None:
+    if len(candles) < BB_PERIOD + 3:
+        return None
+
+    before = candles[-3]   # Nến ngay trước nến #1 — dùng để xác nhận nến #1 là nến ĐẦU TIÊN của chuỗi màu
+    prev   = candles[-2]   # Nến màu thứ 1 — nến chạm/xuyên band
+    curr   = candles[-1]   # Nến màu thứ 2 — xác nhận, báo tín hiệu khi đóng cửa
+
+    # BB tính đến trước nến màu thứ 1, tránh self-reference
+    ind = compute_indicators(candles[:-2])
+    if ind["bb_middle"] == 0.0:
+        return None
+
+    if direction == "LONG":
+        # Nến 1: xanh, chạm/xuyên BB dưới, và là nến xanh đầu tiên (nến trước đó không xanh)
+        if not (prev["close"] > prev["open"] and prev["low"] <= ind["bb_lower"]):
+            return None
+        if before["close"] > before["open"]:
+            return None   # Nến trước cũng xanh -> đây là chuỗi tiếp diễn, đã báo ở nến trước rồi
+        if not (curr["close"] > curr["open"]):
+            return None
+        # Cả 2 nến đều không được có râu vượt qua BB giữa (nằm hẳn dưới band giữa)
+        if prev["high"] >= ind["bb_middle"] or curr["high"] >= ind["bb_middle"]:
+            return None
+    else:
+        # Nến 1: đỏ, chạm/xuyên BB trên, và là nến đỏ đầu tiên (nến trước đó không đỏ)
+        if not (prev["close"] < prev["open"] and prev["high"] >= ind["bb_upper"]):
+            return None
+        if before["close"] < before["open"]:
+            return None   # Nến trước cũng đỏ -> chuỗi tiếp diễn, đã báo ở nến trước rồi
+        if not (curr["close"] < curr["open"]):
+            return None
+        # Cả 2 nến đều không được có râu vượt qua BB giữa (nằm hẳn trên band giữa)
+        if prev["low"] <= ind["bb_middle"] or curr["low"] <= ind["bb_middle"]:
+            return None
+
+    logger.info(f"{symbol} {direction} | Entry={curr['close']:.4f}")
+    return Signal(symbol=symbol, direction=direction, price=curr["close"], sl=0.0, ind=ind)
+
+
+def detect_legacy_signal(symbol: str, candles: list[dict]) -> Signal | None:
+    """Kèo Short H1 cũ — điều kiện gốc (2 nến tăng bám/vượt biên giữa BB + vol ratio),
+    chỉ đổi nhãn hiển thị thành SHORT, giữ nguyên logic phát hiện."""
     if len(candles) < BB_PERIOD + 5:
         return None
 
-    # BB tính đến trước khi nến 2 đóng, tránh việc giá đóng cửa của chính
-    # nến đang xét kéo lệch đường biên giữa (self-reference)
+    # BB tính đến trước khi nến 2 đóng, tránh self-reference
     ind = compute_indicators(candles[:-1])
     if ind["bb_middle"] == 0.0:
         return None
@@ -132,65 +186,8 @@ def detect_signal(symbol: str, candles: list[dict]) -> Signal | None:
     if not (VOL_RATIO_MIN <= vol_ratio <= VOL_RATIO_MAX):
         return None
 
-    sl = min(prev["low"], curr["low"])
-    logger.info(f"{symbol} LONG | Entry={curr['close']:.4f}  SL={sl:.4f}  VolRatio={vol_ratio:.2f}")
-    return Signal(symbol=symbol, direction="LONG", price=curr["close"], sl=sl, ind=ind)
-
-
-@dataclass
-class MarubozuSignal:
-    symbol:           str
-    price:            float
-    volume:           float
-    prev_volume:      float
-    upper_wick_ratio: float
-    lower_wick_ratio: float
-    ind:              Indicators
-
-
-def detect_marubozu_signal(symbol: str, candles: list[dict]) -> MarubozuSignal | None:
-    if len(candles) < BB_PERIOD + 2:
-        return None
-
-    # BB tính đến trước khi nến này đóng, tránh self-reference (giống detect_signal)
-    ind = compute_indicators(candles[:-1])
-    if ind["bb_middle"] == 0.0:
-        return None
-
-    prev = candles[-2]
-    curr = candles[-1]
-
-    # Nến tăng
-    body = curr["close"] - curr["open"]
-    if body <= 0:
-        return None
-
-    # Marubozu: râu trên nhỏ so với thân
-    upper_wick = curr["high"] - curr["close"]
-    upper_wick_ratio = upper_wick / body
-    if upper_wick_ratio > MARUBOZU_UPPER_WICK_RATIO:
-        return None
-
-    # Marubozu: râu dưới cũng không được vượt quá 30% thân nến
-    lower_wick = curr["open"] - curr["low"]
-    lower_wick_ratio = lower_wick / body
-    if lower_wick_ratio > MARUBOZU_LOWER_WICK_RATIO:
-        return None
-
-    # Khối lượng lớn hơn nến trước
-    if curr["volume"] <= prev["volume"]:
-        return None
-
-    # Đóng cửa xuyên qua biên giữa BB (mở dưới, đóng trên hẳn)
-    if not (curr["open"] < ind["bb_middle"] < curr["close"]):
-        return None
-
-    logger.info(f"{symbol} MARUBOZU | Close={curr['close']:.4f}  "
-                f"UpperWick={upper_wick_ratio:.2%}  LowerWick={lower_wick_ratio:.2%}")
-    return MarubozuSignal(
-        symbol=symbol, price=curr["close"], volume=curr["volume"], prev_volume=prev["volume"],
-        upper_wick_ratio=upper_wick_ratio, lower_wick_ratio=lower_wick_ratio, ind=ind,
-    )
+    logger.info(f"{symbol} SHORT (legacy) | Entry={curr['close']:.4f}  VolRatio={vol_ratio:.2f}")
+    return Signal(symbol=symbol, direction="SHORT", price=curr["close"], sl=0.0, ind=ind)
 
 # ═══════════════════════════════════════════════
 #  TELEGRAM
@@ -203,76 +200,81 @@ def _fmt(price: float) -> str:
     return f"{price:.6f}"
 
 
-def _build_message(signal: Signal) -> str:
+def _build_message(signal: Signal, interval_display: str, tp: float) -> str:
+    is_short = signal.direction == "SHORT"
+    emoji    = "🔴" if is_short else "🟢"
+    band     = "trên" if is_short else "dưới"
+    color    = "đỏ" if is_short else "xanh"
     return (
-        f"*🟢 LONG SIGNAL*\n\n"
-        f"Coin: `{signal.symbol}`\n"
-        f"Timeframe: {INTERVAL_DISPLAY}\n\n"
+        f"*{emoji} {signal.direction} SIGNAL ({interval_display})*\n\n"
+        f"Coin: `{signal.symbol}`\n\n"
+        f"Điều kiện:\n"
+        f"✓ Nến {color} #1 chạm/xuyên BB {band}, là nến {color} đầu tiên\n"
+        f"✓ Nến {color} #2 đóng cửa xác nhận\n"
+        f"✓ Cả 2 nến không có râu vượt qua BB giữa\n\n"
+        f"Entry: `{_fmt(signal.price)}`\n"
+        f"TP: `{_fmt(tp)}`\n"
+        f"SL: `{_fmt(signal.sl)}`"
+    )
+
+
+def _build_legacy_message(signal: Signal, interval_display: str, tp: float) -> str:
+    return (
+        f"*🔴 {signal.direction} SIGNAL ({interval_display})*\n\n"
+        f"Coin: `{signal.symbol}`\n\n"
         f"Điều kiện:\n"
         f"✓ Hai nến tăng liên tiếp\n"
         f"✓ Nến 1 bám biên giữa, nến 2 vượt biên giữa\n"
         f"✓ Vol nến 2 bằng {VOL_RATIO_MIN*100:.0f}%-{VOL_RATIO_MAX*100:.0f}% vol nến 1\n\n"
         f"Entry: `{_fmt(signal.price)}`\n"
+        f"TP: `{_fmt(tp)}`\n"
         f"SL: `{_fmt(signal.sl)}`"
     )
 
 
-async def send_signal(signal: Signal) -> None:
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        logger.warning("Chưa cấu hình TELEGRAM_TOKEN / TELEGRAM_CHAT_ID")
-        return
-
-    text    = _build_message(signal)
-    url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
-
-    try:
-        connector = aiohttp.TCPConnector(ssl=False)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    logger.info(f"[TG] Gửi: {signal.symbol} {signal.direction}")
-                else:
-                    body = await resp.text()
-                    logger.error(f"[TG] Lỗi {resp.status}: {body}")
-    except Exception as e:
-        logger.error(f"[TG] Không gửi được: {e}")
-
-
-def _build_marubozu_message(signal: MarubozuSignal) -> str:
+def _build_close_message(pos: Position, interval_display: str, hit: Literal["TP", "SL"]) -> str:
+    level  = pos.tp if hit == "TP" else pos.sl
+    emoji  = "✅" if hit == "TP" else "🛑"
+    pct    = abs(level - pos.entry) / pos.entry * 100
+    label  = "Chốt lời (TP)" if hit == "TP" else "Cắt lỗ (SL)"
     return (
-        f"*🟡 MARUBOZU SIGNAL*\n\n"
-        f"Coin: `{signal.symbol}`\n"
-        f"Timeframe: {INTERVAL_H1_DISPLAY}\n\n"
-        f"Điều kiện:\n"
-        f"✓ Nến tăng Marubozu (râu trên ≤ {MARUBOZU_UPPER_WICK_RATIO*100:.0f}%, "
-        f"râu dưới ≤ {MARUBOZU_LOWER_WICK_RATIO*100:.0f}% thân)\n"
-        f"✓ Khối lượng lớn hơn nến trước\n"
-        f"✓ Đóng cửa xuyên qua biên giữa BB\n\n"
-        f"Giá đóng cửa: `{_fmt(signal.price)}`"
+        f"*{emoji} {label} — {pos.direction} {pos.symbol} ({interval_display})*\n\n"
+        f"Entry: `{_fmt(pos.entry)}`\n"
+        f"{hit}: `{_fmt(level)}` (~{pct:.1f}%)"
     )
 
 
-async def send_marubozu_signal(signal: MarubozuSignal) -> None:
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID_H1:
-        logger.warning("Chưa cấu hình TELEGRAM_CHAT_ID_H1 — bỏ qua gửi tín hiệu Marubozu")
-        return
-
-    text    = _build_marubozu_message(signal)
+async def _send_telegram_message(chat_id: str, text: str, tag: str) -> None:
     url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID_H1, "text": text, "parse_mode": "Markdown"}
-
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     try:
         connector = aiohttp.TCPConnector(ssl=False)
         async with aiohttp.ClientSession(connector=connector) as session:
             async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
-                    logger.info(f"[TG-H1] Gửi: {signal.symbol} MARUBOZU")
+                    logger.info(f"[TG-{tag}] Gửi thành công")
                 else:
                     body = await resp.text()
-                    logger.error(f"[TG-H1] Lỗi {resp.status}: {body}")
+                    logger.error(f"[TG-{tag}] Lỗi {resp.status}: {body}")
     except Exception as e:
-        logger.error(f"[TG-H1] Không gửi được: {e}")
+        logger.error(f"[TG-{tag}] Không gửi được: {e}")
+
+
+async def send_signal(signal: Signal, chat_id: str, interval_display: str, tp: float,
+                       builder: Callable[[Signal, str, float], str] = _build_message) -> None:
+    if not TELEGRAM_TOKEN or not chat_id:
+        logger.warning(f"[{interval_display}] Chưa cấu hình TELEGRAM_TOKEN / chat ID")
+        return
+    text = builder(signal, interval_display, tp)
+    await _send_telegram_message(chat_id, text, f"{interval_display}-{signal.direction}")
+
+
+async def send_close_alert(pos: Position, chat_id: str, interval_display: str, hit: Literal["TP", "SL"]) -> None:
+    if not TELEGRAM_TOKEN or not chat_id:
+        logger.warning(f"[{interval_display}] Chưa cấu hình TELEGRAM_TOKEN / chat ID")
+        return
+    text = _build_close_message(pos, interval_display, hit)
+    await _send_telegram_message(chat_id, text, f"{interval_display}-{hit}")
 
 # ═══════════════════════════════════════════════
 #  BINANCE CLIENT
@@ -454,9 +456,22 @@ async def resolve_symbols() -> list[str]:
 
 
 class Scanner:
-    def __init__(self, symbols: list[str]) -> None:
-        self.symbols = symbols
+    def __init__(self, symbols: list[str], interval: str, interval_display: str,
+                 chat_id: str, detect_fn: Callable[[str, list[dict]], Signal | None],
+                 tp_pct: float, sl_pct: float,
+                 message_builder: Callable[[Signal, str, float], str] = _build_message,
+                 poll_offset_sec: float = 0.0) -> None:
+        self.symbols          = symbols
+        self.interval         = interval
+        self.interval_display = interval_display
+        self.chat_id          = chat_id
+        self.detect_fn        = detect_fn
+        self.tp_pct           = tp_pct
+        self.sl_pct           = sl_pct
+        self.message_builder  = message_builder
+        self.poll_offset_sec  = poll_offset_sec
         self._last_alert: dict[str, datetime] = {}
+        self._positions: dict[str, Position] = {}   # symbol -> lệnh đang mở
 
     def _cooldown_left(self, symbol: str, direction: str) -> int:
         last = self._last_alert.get(f"{symbol}_{direction}")
@@ -465,60 +480,73 @@ class Scanner:
         remaining = timedelta(minutes=ALERT_COOLDOWN_MINUTES) - (datetime.now() - last)
         return max(0, int(remaining.total_seconds()))
 
+    async def _check_position(self, symbol: str, candle: dict) -> None:
+        """Sau mỗi nến mới, kiểm tra lệnh đang mở của coin này đã chạm TP hay SL chưa."""
+        pos = self._positions.get(symbol)
+        if pos is None:
+            return
+
+        if pos.direction == "SHORT":
+            hit_tp = candle["low"]  <= pos.tp
+            hit_sl = candle["high"] >= pos.sl
+        else:
+            hit_tp = candle["high"] >= pos.tp
+            hit_sl = candle["low"]  <= pos.sl
+
+        if not (hit_tp or hit_sl):
+            return
+
+        if hit_tp and hit_sl:
+            # Cả 2 mốc bị chạm trong cùng 1 nến — ước lượng theo hướng nến để chọn mốc chạm trước
+            bearish = candle["close"] <= candle["open"]
+            hit: Literal["TP", "SL"] = ("TP" if bearish else "SL") if pos.direction == "SHORT" \
+                else ("SL" if bearish else "TP")
+        else:
+            hit = "TP" if hit_tp else "SL"
+
+        logger.info(f"[{self.interval_display}] {symbol} {pos.direction} {hit} | "
+                    f"Entry={pos.entry:.4f}  {hit}={(pos.tp if hit == 'TP' else pos.sl):.4f}")
+        await send_close_alert(pos, self.chat_id, self.interval_display, hit)
+        del self._positions[symbol]
+
     async def on_candle(self, symbol: str, candles: list[dict]) -> None:
-        signal = detect_signal(symbol, candles)
+        await self._check_position(symbol, candles[-1])
+        if symbol in self._positions:
+            return   # Lệnh của coin này vẫn đang mở, chưa tìm tín hiệu mới
+
+        signal = self.detect_fn(symbol, candles)
         if signal is None:
             return
 
         left = self._cooldown_left(symbol, signal.direction)
         if left > 0:
             m, s = divmod(left, 60)
-            logger.info(f"{symbol} {signal.direction}: cooldown còn {m}p{s:02d}s")
+            logger.info(f"[{self.interval_display}] {symbol} {signal.direction}: cooldown còn {m}p{s:02d}s")
             return
 
         self._last_alert[f"{symbol}_{signal.direction}"] = datetime.now()
-        logger.info(f">>> TÍN HIỆU: {symbol} {signal.direction} | Entry={signal.price} | SL={signal.sl}")
-        await send_signal(signal)
 
-    async def run(self) -> None:
-        client = BinanceClient(self.symbols, INTERVAL, CANDLE_BUFFER, interval_display=INTERVAL_DISPLAY)
-        logger.info(f"[{INTERVAL_DISPLAY}] Sẵn sàng — theo dõi {len(client.symbols)} cặp")
-        await client.run(self.on_candle)
+        if signal.direction == "SHORT":
+            tp = signal.price * (1 - self.tp_pct)
+            signal.sl = signal.price * (1 + self.sl_pct)
+        else:
+            tp = signal.price * (1 + self.tp_pct)
+            signal.sl = signal.price * (1 - self.sl_pct)
+        self._positions[symbol] = Position(
+            symbol=symbol, direction=signal.direction, entry=signal.price,
+            tp=tp, sl=signal.sl, opened_at=datetime.now(),
+        )
 
-
-class MarubozuScanner:
-    def __init__(self, symbols: list[str]) -> None:
-        self.symbols = symbols
-        self._last_alert: dict[str, datetime] = {}
-
-    def _cooldown_left(self, symbol: str) -> int:
-        last = self._last_alert.get(symbol)
-        if last is None:
-            return 0
-        remaining = timedelta(minutes=ALERT_COOLDOWN_MINUTES) - (datetime.now() - last)
-        return max(0, int(remaining.total_seconds()))
-
-    async def on_candle(self, symbol: str, candles: list[dict]) -> None:
-        signal = detect_marubozu_signal(symbol, candles)
-        if signal is None:
-            return
-
-        left = self._cooldown_left(symbol)
-        if left > 0:
-            m, s = divmod(left, 60)
-            logger.info(f"[{INTERVAL_H1_DISPLAY}] {symbol} MARUBOZU: cooldown còn {m}p{s:02d}s")
-            return
-
-        self._last_alert[symbol] = datetime.now()
-        logger.info(f">>> [{INTERVAL_H1_DISPLAY}] TÍN HIỆU MARUBOZU: {symbol} | Close={signal.price}")
-        await send_marubozu_signal(signal)
+        logger.info(f">>> [{self.interval_display}] TÍN HIỆU: {symbol} {signal.direction} | "
+                    f"Entry={signal.price} | TP={tp} | SL={signal.sl}")
+        await send_signal(signal, self.chat_id, self.interval_display, tp, self.message_builder)
 
     async def run(self) -> None:
         client = BinanceClient(
-            self.symbols, INTERVAL_H1, CANDLE_BUFFER,
-            interval_display=INTERVAL_H1_DISPLAY, poll_offset_sec=H1_POLL_STAGGER_SEC,
+            self.symbols, self.interval, CANDLE_BUFFER,
+            interval_display=self.interval_display, poll_offset_sec=self.poll_offset_sec,
         )
-        logger.info(f"[{INTERVAL_H1_DISPLAY}] Sẵn sàng — theo dõi {len(client.symbols)} cặp")
+        logger.info(f"[{self.interval_display}] Sẵn sàng — theo dõi {len(client.symbols)} cặp")
         await client.run(self.on_candle)
 
 # ═══════════════════════════════════════════════
@@ -532,13 +560,13 @@ def _banner() -> None:
         logger.info(f"  Symbol    : Tự động top {TOP_SYMBOLS_COUNT}")
     else:
         logger.info(f"  Symbol    : Thủ công {len(SYMBOLS)} cặp")
-    logger.info(f"  Timeframe : {INTERVAL_DISPLAY}")
+    logger.info(f"  Timeframe : {INTERVAL_H1_DISPLAY}  (chạy cho cả 3 kèo)")
+    logger.info(f"  LONG/SHORT mới (chạm BB) -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID else 'OK'}  "
+                f"TP/SL={NEW_TP_PCT*100:.1f}%/{NEW_SL_PCT*100:.1f}%")
+    logger.info(f"  SHORT cũ (bám biên giữa)  -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID_H1 else 'OK'}  "
+                f"TP/SL={LEGACY_TP_PCT*100:.1f}%/{LEGACY_SL_PCT*100:.1f}%")
     logger.info(f"  BB        : period={BB_PERIOD}  std={BB_STD}")
-    logger.info(f"  Vol ratio : {VOL_RATIO_MIN} - {VOL_RATIO_MAX}")
     logger.info(f"  Cooldown  : {ALERT_COOLDOWN_MINUTES} phút")
-    logger.info(f"  Marubozu  : {INTERVAL_H1_DISPLAY}  "
-                f"upper<={MARUBOZU_UPPER_WICK_RATIO*100:.0f}%  lower<={MARUBOZU_LOWER_WICK_RATIO*100:.0f}%  "
-                f"chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID_H1 else 'OK'}")
     logger.info("=" * 50)
 
 
@@ -578,23 +606,27 @@ async def _send_startup_message_to(chat_id: str, label: str, text: str) -> None:
 
 
 async def _send_startup_message() -> None:
-    text_h4 = (
-        "✅ *Bot đã khởi động*\n\n"
-        f"Timeframe: `{INTERVAL_DISPLAY}`\n"
-        f"Theo dõi: `{'Top ' + str(TOP_SYMBOLS_COUNT) + ' coin' if AUTO_TOP_SYMBOLS else str(len(SYMBOLS)) + ' coin'}`\n"
-        f"Cooldown: `{ALERT_COOLDOWN_MINUTES} phút`\n\n"
-        "Đang chờ tín hiệu LONG..."
-    )
-    await _send_startup_message_to(TELEGRAM_CHAT_ID, "H4", text_h4)
+    watch_desc = 'Top ' + str(TOP_SYMBOLS_COUNT) + ' coin' if AUTO_TOP_SYMBOLS else str(len(SYMBOLS)) + ' coin'
 
-    text_h1 = (
+    text_new = (
         "✅ *Bot đã khởi động*\n\n"
         f"Timeframe: `{INTERVAL_H1_DISPLAY}`\n"
-        f"Theo dõi: `{'Top ' + str(TOP_SYMBOLS_COUNT) + ' coin' if AUTO_TOP_SYMBOLS else str(len(SYMBOLS)) + ' coin'}`\n"
-        f"Cooldown: `{ALERT_COOLDOWN_MINUTES} phút`\n\n"
-        "Đang chờ tín hiệu MARUBOZU..."
+        f"Theo dõi: `{watch_desc}`\n"
+        f"Cooldown: `{ALERT_COOLDOWN_MINUTES} phút`\n"
+        f"TP/SL: `{NEW_TP_PCT*100:.1f}% / {NEW_SL_PCT*100:.1f}%`\n\n"
+        "Đang chờ tín hiệu LONG + SHORT (chạm BB)..."
     )
-    await _send_startup_message_to(TELEGRAM_CHAT_ID_H1, "H1", text_h1)
+    await _send_startup_message_to(TELEGRAM_CHAT_ID, "NEW-H1", text_new)
+
+    text_legacy = (
+        "✅ *Bot đã khởi động*\n\n"
+        f"Timeframe: `{INTERVAL_H1_DISPLAY}`\n"
+        f"Theo dõi: `{watch_desc}`\n"
+        f"Cooldown: `{ALERT_COOLDOWN_MINUTES} phút`\n"
+        f"TP/SL: `{LEGACY_TP_PCT*100:.1f}% / {LEGACY_SL_PCT*100:.1f}%`\n\n"
+        "Đang chờ tín hiệu SHORT (cũ)..."
+    )
+    await _send_startup_message_to(TELEGRAM_CHAT_ID_H1, "LEGACY-SHORT-H1", text_legacy)
 
 
 async def _run_forever(label: str, scanner) -> None:
@@ -614,8 +646,24 @@ async def _main() -> None:
     try:
         symbols = await resolve_symbols()
         await asyncio.gather(
-            _run_forever(INTERVAL_DISPLAY, Scanner(symbols)),
-            _run_forever(INTERVAL_H1_DISPLAY, MarubozuScanner(symbols)),
+            _run_forever("LONG-H1", Scanner(
+                symbols, INTERVAL_H1, INTERVAL_H1_DISPLAY, TELEGRAM_CHAT_ID,
+                detect_fn=lambda s, c: detect_signal(s, c, direction="LONG"),
+                tp_pct=NEW_TP_PCT, sl_pct=NEW_SL_PCT,
+            )),
+            _run_forever("SHORT-H1", Scanner(
+                symbols, INTERVAL_H1, INTERVAL_H1_DISPLAY, TELEGRAM_CHAT_ID,
+                detect_fn=lambda s, c: detect_signal(s, c, direction="SHORT"),
+                tp_pct=NEW_TP_PCT, sl_pct=NEW_SL_PCT,
+                poll_offset_sec=H1_POLL_STAGGER_SEC,
+            )),
+            _run_forever("LEGACY-SHORT-H1", Scanner(
+                symbols, INTERVAL_H1, INTERVAL_H1_DISPLAY, TELEGRAM_CHAT_ID_H1,
+                detect_fn=detect_legacy_signal,
+                tp_pct=LEGACY_TP_PCT, sl_pct=LEGACY_SL_PCT,
+                message_builder=_build_legacy_message,
+                poll_offset_sec=H1_POLL_STAGGER_SEC * 2,
+            )),
         )
     except KeyboardInterrupt:
         logger.info("Bot dừng.")
