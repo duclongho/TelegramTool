@@ -4,6 +4,7 @@ Binance Futures Song Kiem Signal Bot
 Chỉnh TELEGRAM_TOKEN, TELEGRAM_CHAT_ID trước khi chạy.
 """
 import asyncio
+import json
 import logging
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -15,12 +16,14 @@ import aiohttp
 # ═══════════════════════════════════════════════
 #  CẤU HÌNH — chỉnh ở đây
 # ═══════════════════════════════════════════════
-TELEGRAM_TOKEN      = "8641278115:AAEB08VXrX5YJl_2zzM_SFF4JRdEwIfAj-s"   # Token bot Telegram
-TELEGRAM_CHAT_ID    = "-1004448248877"   # Chat ID nhận LONG SIGNAL (H1) + SHORT SIGNAL (H1) — điều kiện mới, chạm BB
-TELEGRAM_CHAT_ID_H1 = "-1004340326145"   # Chat ID nhận tín hiệu SHORT (H1) cũ — giữ nguyên điều kiện + TP/SL cũ
+TELEGRAM_TOKEN         = "8641278115:AAEB08VXrX5YJl_2zzM_SFF4JRdEwIfAj-s"   # Token bot Telegram
+TELEGRAM_CHAT_ID       = "-1004448248877"   # Chat ID nhận LONG SIGNAL (H1) + SHORT SIGNAL (H1) — điều kiện mới, chạm BB
+TELEGRAM_CHAT_ID_H1    = "-1004340326145"   # Chat ID nhận tín hiệu SHORT (H1) cũ — giữ nguyên điều kiện + TP/SL cũ
+TELEGRAM_CHAT_ID_SPIKE = "-1003980035281"   # : Chat ID nhận LONG/SHORT SIGNAL ĐỘT BIẾN (real-time)
 
 AUTO_TOP_SYMBOLS  = True   # True = tự động lấy top coin theo khối lượng
-TOP_SYMBOLS_COUNT = 100     # Số lượng coin theo dõi
+TOP_SYMBOLS_COUNT = 200     # Số lượng coin theo dõi (LONG-H1 + SHORT-H1 mới)
+LEGACY_TOP_SYMBOLS_COUNT = 150   # Số lượng coin theo dõi riêng cho SHORT-H1 cũ
 
 SYMBOLS = [                # Dùng khi AUTO_TOP_SYMBOLS = False
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
@@ -31,7 +34,6 @@ CANDLE_BUFFER = 150
 
 INTERVAL_H1         = "1h"   # Timeframe dùng chung cho tất cả các kèo
 INTERVAL_H1_DISPLAY = "H1"
-H1_POLL_STAGGER_SEC = 30     # Trễ thêm N giây khi poll các scanner phụ để tránh trùng đợt poll
 
 BB_PERIOD = 20
 BB_STD    = 2.0
@@ -40,15 +42,27 @@ BAND_TOUCH_TOLERANCE = 0.05   # 5% - coi là "bám sát" đường BB giữa (k�
 VOL_RATIO_MIN        = 0.95   # Vol nến 2 (sau) tối thiểu 95% vol nến 1 (trước) (kèo Short H1 cũ)
 VOL_RATIO_MAX        = 1.15   # Vol nến 2 (sau) tối đa 115% vol nến 1 (trước) (kèo Short H1 cũ)
 
+DOJI_BODY_MAX_RATIO       = 0.3   # Thân nến tối đa 30% tổng biên độ nến (high-low) — coi là nến doji
+DOJI_SHORT_WICK_MAX_RATIO = 0.1   # Râu phía đối diện hướng đảo chiều tối đa 10% tổng biên độ (gần như không có)
+BAND_CROSS_MIN_RATIO      = 0.1   # Phần xuyên qua BB trên/dưới tối thiểu 10% tổng biên độ nến
+
+SPIKE_LOOKBACK   = 10   # Số nến gần nhất dùng để tính biên độ/volume trung bình
+SPIKE_RANGE_MULT = 6    # Biên độ nến đột biến tối thiểu gấp 6 lần trung bình
+SPIKE_VOL_MULT   = 4    # Khối lượng đột biến tối thiểu gấp 4 lần trung bình (khoảng 4-5 lần)
+
 MIN_CANDLES_FOR_SIGNAL = BB_PERIOD + 5  # Số nến tối thiểu cần có trước khi bắt đầu xét tín hiệu
 
 ALERT_COOLDOWN_MINUTES = 30    # Cooldown giữa 2 tín hiệu cùng coin/chiều
 
 NEW_TP_PCT = 0.025   # Chốt lời cố định 2.5% (kèo Long/Short H1 mới — điều kiện chạm BB)
-NEW_SL_PCT = 0.01    # Cắt lỗ cố định 1% (kèo Long/Short H1 mới)
+NEW_SL_PCT = 0.02    # Cắt lỗ cố định 2% (kèo Long/Short H1 mới)
 
-LEGACY_TP_PCT = 0.04   # Chốt lời cố định 4% (kèo Short H1 cũ)
+LEGACY_TP_PCT = 0.025  # Chốt lời cố định 2.5% (kèo Short H1 cũ)
 LEGACY_SL_PCT = 0.02   # Cắt lỗ cố định 2% (kèo Short H1 cũ)
+
+WS_MAX_STREAMS_PER_CONN = 190   # Giới hạn an toàn số stream / 1 kết nối WebSocket (Binance giới hạn ~200)
+WS_RECONNECT_DELAY_SEC  = 5     # Chờ trước khi kết nối lại sau khi WebSocket bị rớt
+WS_HEARTBEAT_MINUTES    = 60    # Log xác nhận vẫn đang kết nối Binance mỗi N phút
 
 # ═══════════════════════════════════════════════
 #  LOGGING
@@ -112,41 +126,70 @@ class Position:
     opened_at: datetime
 
 
-def detect_signal(symbol: str, candles: list[dict],
-                   direction: Literal["LONG", "SHORT"] = "LONG") -> Signal | None:
-    if len(candles) < BB_PERIOD + 3:
+def _position_hit(pos: Position, candle: dict) -> Literal["TP", "SL"] | None:
+    """Kiểm tra 1 nến (đã đóng hoặc đang hình thành) có chạm TP/SL của lệnh đang mở không."""
+    if pos.direction == "SHORT":
+        hit_tp = candle["low"]  <= pos.tp
+        hit_sl = candle["high"] >= pos.sl
+    else:
+        hit_tp = candle["high"] >= pos.tp
+        hit_sl = candle["low"]  <= pos.sl
+
+    if not (hit_tp or hit_sl):
         return None
 
-    before = candles[-3]   # Nến ngay trước nến #1 — dùng để xác nhận nến #1 là nến ĐẦU TIÊN của chuỗi màu
-    prev   = candles[-2]   # Nến màu thứ 1 — nến chạm/xuyên band
-    curr   = candles[-1]   # Nến màu thứ 2 — xác nhận, báo tín hiệu khi đóng cửa
+    if hit_tp and hit_sl:
+        # Cả 2 mốc bị chạm trong cùng 1 nến — ước lượng theo hướng nến để chọn mốc chạm trước
+        bearish = candle["close"] <= candle["open"]
+        return ("TP" if bearish else "SL") if pos.direction == "SHORT" else ("SL" if bearish else "TP")
+    return "TP" if hit_tp else "SL"
 
-    # BB tính đến trước nến màu thứ 1, tránh self-reference
-    ind = compute_indicators(candles[:-2])
+
+def detect_signal(symbol: str, candles: list[dict],
+                   direction: Literal["LONG", "SHORT"] = "LONG") -> Signal | None:
+    if len(candles) < BB_PERIOD + 2:
+        return None
+
+    prev = candles[-2]   # Nến ngay trước — dùng để so khối lượng
+    curr = candles[-1]   # Nến chuồn chuồn/bia mộ chạm band — báo tín hiệu ngay khi đóng cửa
+
+    rng = curr["high"] - curr["low"]
+    if rng <= 0:
+        return None
+
+    body = abs(curr["close"] - curr["open"])
+    if body > DOJI_BODY_MAX_RATIO * rng:
+        return None   # Thân nến quá lớn, không phải doji
+
+    if curr["volume"] < 2 * prev["volume"]:
+        return None   # Khối lượng phải gấp đôi trở lên nến trước
+
+    # BB tính đến trước nến hiện tại, tránh self-reference
+    ind = compute_indicators(candles[:-1])
     if ind["bb_middle"] == 0.0:
         return None
 
     if direction == "LONG":
-        # Nến 1: xanh, chạm/xuyên BB dưới, và là nến xanh đầu tiên (nến trước đó không xanh)
-        if not (prev["close"] > prev["open"] and prev["low"] <= ind["bb_lower"]):
-            return None
-        if before["close"] > before["open"]:
-            return None   # Nến trước cũng xanh -> đây là chuỗi tiếp diễn, đã báo ở nến trước rồi
+        # Nến rút râu chuyển hẳn sang xanh: chạm/xuyên sâu BB dưới rồi bật lên đóng cửa xanh
         if not (curr["close"] > curr["open"]):
+            return None   # Đóng nến đỏ -> bỏ qua
+        upper_wick = curr["high"] - max(curr["open"], curr["close"])
+        if upper_wick > DOJI_SHORT_WICK_MAX_RATIO * rng:
             return None
-        # Cả 2 nến đều không được có râu vượt qua BB giữa (nằm hẳn dưới band giữa)
-        if prev["high"] >= ind["bb_middle"] or curr["high"] >= ind["bb_middle"]:
+        if ind["bb_lower"] - curr["low"] < BAND_CROSS_MIN_RATIO * rng:
+            return None
+        if curr["high"] >= ind["bb_middle"]:
             return None
     else:
-        # Nến 1: đỏ, chạm/xuyên BB trên, và là nến đỏ đầu tiên (nến trước đó không đỏ)
-        if not (prev["close"] < prev["open"] and prev["high"] >= ind["bb_upper"]):
-            return None
-        if before["close"] < before["open"]:
-            return None   # Nến trước cũng đỏ -> chuỗi tiếp diễn, đã báo ở nến trước rồi
+        # Nến rút râu chuyển hẳn sang đỏ: chạm/xuyên sâu BB trên rồi rớt xuống đóng cửa đỏ
         if not (curr["close"] < curr["open"]):
+            return None   # Đóng nến xanh -> bỏ qua
+        lower_wick = min(curr["open"], curr["close"]) - curr["low"]
+        if lower_wick > DOJI_SHORT_WICK_MAX_RATIO * rng:
             return None
-        # Cả 2 nến đều không được có râu vượt qua BB giữa (nằm hẳn trên band giữa)
-        if prev["low"] <= ind["bb_middle"] or curr["low"] <= ind["bb_middle"]:
+        if curr["high"] - ind["bb_upper"] < BAND_CROSS_MIN_RATIO * rng:
+            return None
+        if curr["low"] <= ind["bb_middle"]:
             return None
 
     logger.info(f"{symbol} {direction} | Entry={curr['close']:.4f}")
@@ -189,6 +232,41 @@ def detect_legacy_signal(symbol: str, candles: list[dict]) -> Signal | None:
     logger.info(f"{symbol} SHORT (legacy) | Entry={curr['close']:.4f}  VolRatio={vol_ratio:.2f}")
     return Signal(symbol=symbol, direction="SHORT", price=curr["close"], sl=0.0, ind=ind)
 
+
+def detect_spike_signal(symbol: str, closed_candles: list[dict], live_candle: dict,
+                         direction: Literal["LONG", "SHORT"] = "SHORT") -> Signal | None:
+    """Nến biến động đột biến xuyên BB trên/dưới ngay trong lúc đang hình thành (chưa đóng cửa).
+    Báo tín hiệu ngay lập tức — không chờ đóng nến, không chờ rút râu."""
+    if len(closed_candles) < max(BB_PERIOD, SPIKE_LOOKBACK):
+        return None
+
+    lookback   = closed_candles[-SPIKE_LOOKBACK:]
+    avg_range  = sum(c["high"] - c["low"] for c in lookback) / SPIKE_LOOKBACK
+    avg_volume = sum(c["volume"] for c in lookback) / SPIKE_LOOKBACK
+    if avg_range <= 0 or avg_volume <= 0:
+        return None
+
+    live_range = live_candle["high"] - live_candle["low"]
+    if live_range < SPIKE_RANGE_MULT * avg_range:
+        return None
+    if live_candle["volume"] < SPIKE_VOL_MULT * avg_volume:
+        return None
+
+    ind = compute_indicators(closed_candles)
+    if ind["bb_middle"] == 0.0:
+        return None
+
+    if direction == "SHORT":
+        if live_candle["high"] <= ind["bb_upper"]:
+            return None
+    else:
+        if live_candle["low"] >= ind["bb_lower"]:
+            return None
+
+    logger.info(f"{symbol} {direction} (spike) | Entry={live_candle['close']:.4f}  "
+                f"Range={live_range:.4f} (TB={avg_range:.4f})  Vol={live_candle['volume']:.0f} (TB={avg_volume:.0f})")
+    return Signal(symbol=symbol, direction=direction, price=live_candle["close"], sl=0.0, ind=ind)
+
 # ═══════════════════════════════════════════════
 #  TELEGRAM
 # ═══════════════════════════════════════════════
@@ -201,17 +279,18 @@ def _fmt(price: float) -> str:
 
 
 def _build_message(signal: Signal, interval_display: str, tp: float) -> str:
-    is_short = signal.direction == "SHORT"
-    emoji    = "🔴" if is_short else "🟢"
-    band     = "trên" if is_short else "dưới"
-    color    = "đỏ" if is_short else "xanh"
+    is_short   = signal.direction == "SHORT"
+    emoji      = "🔴" if is_short else "🟢"
+    band       = "trên" if is_short else "dưới"
+    candle_dir = "cây nến giảm" if is_short else "cây nến tăng"
     return (
         f"*{emoji} {signal.direction} SIGNAL ({interval_display})*\n\n"
         f"Coin: `{signal.symbol}`\n\n"
         f"Điều kiện:\n"
-        f"✓ Nến {color} #1 chạm/xuyên BB {band}, là nến {color} đầu tiên\n"
-        f"✓ Nến {color} #2 đóng cửa xác nhận\n"
-        f"✓ Cả 2 nến không có râu vượt qua BB giữa\n\n"
+        f"✓ Nến rút râu xuyên qua BB {band}\n"
+        f"✓ Là {candle_dir}\n"
+        f"✓ Chưa vượt qua BB giữa\n"
+        f"✓ Khối lượng gấp đôi trở lên nến trước\n\n"
         f"Entry: `{_fmt(signal.price)}`\n"
         f"TP: `{_fmt(tp)}`\n"
         f"SL: `{_fmt(signal.sl)}`"
@@ -226,6 +305,24 @@ def _build_legacy_message(signal: Signal, interval_display: str, tp: float) -> s
         f"✓ Hai nến tăng liên tiếp\n"
         f"✓ Nến 1 bám biên giữa, nến 2 vượt biên giữa\n"
         f"✓ Vol nến 2 bằng {VOL_RATIO_MIN*100:.0f}%-{VOL_RATIO_MAX*100:.0f}% vol nến 1\n\n"
+        f"Entry: `{_fmt(signal.price)}`\n"
+        f"TP: `{_fmt(tp)}`\n"
+        f"SL: `{_fmt(signal.sl)}`"
+    )
+
+
+def _build_spike_message(signal: Signal, interval_display: str, tp: float) -> str:
+    is_short = signal.direction == "SHORT"
+    emoji    = "🔴🚨" if is_short else "🟢🚨"
+    band     = "trên" if is_short else "dưới"
+    return (
+        f"*{emoji} {signal.direction} SIGNAL - ĐỘT BIẾN ({interval_display})*\n\n"
+        f"Coin: `{signal.symbol}`\n\n"
+        f"Điều kiện:\n"
+        f"✓ Nến đột biến xuyên qua BB {band} (chưa đóng cửa)\n"
+        f"✓ Biên độ ≥ {SPIKE_RANGE_MULT} lần trung bình {SPIKE_LOOKBACK} nến\n"
+        f"✓ Khối lượng ≥ {SPIKE_VOL_MULT} lần trung bình {SPIKE_LOOKBACK} nến\n"
+        f"✓ Báo ngay lập tức, không chờ đóng nến / rút râu\n\n"
         f"Entry: `{_fmt(signal.price)}`\n"
         f"TP: `{_fmt(tp)}`\n"
         f"SL: `{_fmt(signal.sl)}`"
@@ -277,9 +374,10 @@ async def send_close_alert(pos: Position, chat_id: str, interval_display: str, h
     await _send_telegram_message(chat_id, text, f"{interval_display}-{hit}")
 
 # ═══════════════════════════════════════════════
-#  BINANCE CLIENT
+#  LIVE FEED (WEBSOCKET)
 # ═══════════════════════════════════════════════
 _FUTURES_REST = "https://fapi.binance.com"
+_FUTURES_WS   = "wss://fstream.binance.com"
 
 
 async def fetch_top_symbols(n: int = 50) -> list[str]:
@@ -295,54 +393,44 @@ async def fetch_top_symbols(n: int = 50) -> list[str]:
         ]
         ranked  = sorted(pairs, key=lambda x: float(x["quoteVolume"]), reverse=True)
         symbols = [t["symbol"] for t in ranked[:n]]
-        logger.info(f"Top {n} cặp: {', '.join(symbols)}")
+        logger.info(f"Lấy được top {len(symbols)} cặp theo khối lượng")
         return symbols
     except Exception as e:
         logger.error(f"Không lấy được top symbol: {e}")
         return []
 
 
-class BinanceClient:
-    def __init__(self, symbols: list[str], interval: str, buffer_size: int,
-                 interval_display: str | None = None, poll_offset_sec: float = 0.0):
-        self.symbols          = [s.upper() for s in symbols]
-        self.interval         = interval
-        self.interval_display = interval_display or interval
-        self.buffer_size      = buffer_size
-        self.poll_offset_sec  = poll_offset_sec   # Trễ thêm để tránh trùng giờ poll với client khác
+class LiveFeed:
+    """Nhận dữ liệu nến real-time qua WebSocket kline stream của Binance — thay cho REST
+    polling định kỳ. Dùng CHUNG 1 nguồn cho tất cả scanner cùng interval, tránh mỗi
+    scanner tự gọi REST lặp lại. WebSocket không có dữ liệu quá khứ nên vẫn cần REST
+    để nạp lịch sử ban đầu, và để đồng bộ lại nếu kết nối bị rớt."""
+
+    def __init__(self, symbols: list[str], interval: str, buffer_size: int) -> None:
+        self.symbols     = sorted({s.upper() for s in symbols})
+        self.interval    = interval
+        self.buffer_size = buffer_size
         self.candles: dict[str, deque] = defaultdict(lambda: deque(maxlen=buffer_size))
         self._last_close: dict[str, int] = {}   # symbol -> close_time_ms đã xử lý
-        self._interval_ms = self._parse_interval_ms(interval)
+        self._closed_handlers: list[Callable[[str, list[dict]], Awaitable[None]]] = []
+        self._live_handlers: list[Callable[[str, list[dict], dict], Awaitable[None]]] = []
 
-    @staticmethod
-    def _parse_interval_ms(interval: str) -> int:
-        units = {"m": 60, "h": 3600, "d": 86400}
-        return int(interval[:-1]) * units[interval[-1]] * 1000
+    def on_closed_candle(self, handler: Callable[[str, list[dict]], Awaitable[None]]) -> None:
+        """Đăng ký callback gọi khi 1 nến ĐÃ ĐÓNG (nhận (symbol, candles))."""
+        self._closed_handlers.append(handler)
 
-    async def _fetch_next_close_ms(self) -> int:
-        """Lấy closeTime của nến đang mở từ Binance (chính xác nhất)."""
-        sym = self.symbols[0]
-        try:
-            connector = aiohttp.TCPConnector(ssl=False)
-            async with aiohttp.ClientSession(connector=connector) as session:
-                params = {"symbol": sym, "interval": self.interval, "limit": 1}
-                async with session.get(
-                    f"{_FUTURES_REST}/fapi/v1/klines", params=params,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    rows = await resp.json()
-            return int(rows[0][6])  # closeTime của nến đang mở
-        except Exception as e:
-            logger.error(f"Không lấy được closeTime từ Binance: {e} — dùng tính toán local")
-            now_ms = int(datetime.now().timestamp() * 1000)
-            return ((now_ms // self._interval_ms) + 1) * self._interval_ms - 1
+    def on_live_tick(self, handler: Callable[[str, list[dict], dict], Awaitable[None]]) -> None:
+        """Đăng ký callback gọi mỗi khi có update giá cho nến ĐANG hình thành
+        (nhận (symbol, closed_candles, live_candle))."""
+        self._live_handlers.append(handler)
 
-    async def _fetch_initial(self) -> None:
-        logger.info(f"[{self.interval_display}] Nạp lịch sử {len(self.symbols)} coin...")
+    async def _fetch_history(self, symbols: list[str]) -> None:
+        """Nạp lịch sử nến qua REST — dùng lúc khởi động và khi cần đồng bộ lại sau khi mất kết nối."""
+        logger.info(f"[LiveFeed-{self.interval}] Nạp lịch sử {len(symbols)} coin...")
         ok, fail = 0, []
         connector = aiohttp.TCPConnector(ssl=False)
         async with aiohttp.ClientSession(connector=connector) as session:
-            for sym in self.symbols:
+            for sym in symbols:
                 for attempt in range(3):
                     try:
                         params = {"symbol": sym, "interval": self.interval, "limit": self.buffer_size}
@@ -360,10 +448,8 @@ class BinanceClient:
                                     "low":  float(k[3]), "close": float(k[4]),
                                     "volume": float(k[5]),
                                 })
-                            # Ghi nhớ close_time của nến cuối để tránh xử lý lại
                             if rows:
                                 self._last_close[sym] = int(rows[-2][6])
-                        logger.info(f"  ✓ {sym}: {len(self.candles[sym])} nến")
                         ok += 1
                         break
                     except Exception as e:
@@ -372,80 +458,107 @@ class BinanceClient:
                             fail.append(sym)
                         else:
                             await asyncio.sleep(1)
-        logger.info(f"[{self.interval_display}] Nạp xong {ok}/{len(self.symbols)}" +
+        logger.info(f"[LiveFeed-{self.interval}] Nạp xong {ok}/{len(symbols)}" +
                     (f" | Lỗi: {', '.join(fail)}" if fail else ""))
 
-    async def _poll_all(self, cb: Callable[[str, list], Awaitable[None]],
-                         symbols: list[str] | None = None) -> None:
-        """Fetch 2 nến gần nhất của các symbol chỉ định (mặc định: tất cả), xử lý nến vừa đóng nếu mới."""
-        targets = symbols if symbols is not None else self.symbols
-        closed = 0
-        connector = aiohttp.TCPConnector(ssl=False)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            for sym in targets:
-                try:
-                    params = {"symbol": sym, "interval": self.interval, "limit": 2}
-                    async with session.get(
-                        f"{_FUTURES_REST}/fapi/v1/klines", params=params,
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as resp:
-                        if resp.status != 200:
-                            continue
-                        rows = await resp.json()
-                    if len(rows) < 2:
-                        continue
-                    k          = rows[0]               # nến đã đóng
-                    close_time = int(k[6])
-                    if self._last_close.get(sym) == close_time:
-                        continue                        # đã xử lý rồi
-                    self._last_close[sym] = close_time
-                    self.candles[sym].append({
-                        "open": float(k[1]), "high": float(k[2]),
-                        "low":  float(k[3]), "close": float(k[4]),
-                        "volume": float(k[5]),
-                    })
-                    closed += 1
-                    if len(self.candles[sym]) >= MIN_CANDLES_FOR_SIGNAL:
-                        await cb(sym, list(self.candles[sym]))
-                except Exception as e:
-                    logger.error(f"Poll lỗi {sym}: {e}")
-        if closed:
-            logger.info(f"[{self.interval_display}] Xử lý {closed} nến đóng mới")
+    async def _dispatch_closed(self, symbol: str, candles: list[dict]) -> None:
+        for handler in self._closed_handlers:
+            try:
+                await handler(symbol, candles)
+            except Exception as e:
+                logger.error(f"[LiveFeed] Handler (closed) lỗi cho {symbol}: {e}", exc_info=True)
 
-    async def run(self, cb: Callable[[str, list], Awaitable[None]]) -> None:
-        await self._fetch_initial()
-        cycle = 0
+    async def _dispatch_live(self, symbol: str, candles: list[dict], live_candle: dict) -> None:
+        for handler in self._live_handlers:
+            try:
+                await handler(symbol, candles, live_candle)
+            except Exception as e:
+                logger.error(f"[LiveFeed] Handler (live) lỗi cho {symbol}: {e}", exc_info=True)
+
+    async def _handle_kline_event(self, symbol: str, k: dict) -> None:
+        candle = {
+            "open": float(k["o"]), "high": float(k["h"]),
+            "low":  float(k["l"]), "close": float(k["c"]),
+            "volume": float(k["v"]),
+        }
+        if len(self.candles[symbol]) < MIN_CANDLES_FOR_SIGNAL:
+            return
+
+        if k["x"]:   # nến đã đóng
+            close_time = int(k["T"])
+            if self._last_close.get(symbol) == close_time:
+                return
+            self._last_close[symbol] = close_time
+            self.candles[symbol].append(candle)
+            await self._dispatch_closed(symbol, list(self.candles[symbol]))
+        else:        # nến đang hình thành — báo real-time, không chờ đóng
+            await self._dispatch_live(symbol, list(self.candles[symbol]), candle)
+
+    async def _run_connection(self, chunk: list[str]) -> None:
+        streams = "/".join(f"{s.lower()}@kline_{self.interval}" for s in chunk)
+        url = f"{_FUTURES_WS}/stream?streams={streams}"
         while True:
-            next_close_ms = await self._fetch_next_close_ms()
-            now_ms = int(datetime.now().timestamp() * 1000)
-            wait   = max(1.0, (next_close_ms - now_ms + 8000) / 1000) + self.poll_offset_sec
-            close_dt = datetime.utcfromtimestamp(next_close_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
-            logger.info(f"[{self.interval_display}] Chờ {wait:.0f}s — nến đóng lúc {close_dt} UTC")
-            await asyncio.sleep(wait)
-            cycle += 1
-            logger.info(f"[{self.interval_display}][Chu kỳ #{cycle}] Đang kiểm tra nến mới...")
-            await self._poll_all(cb)
+            first_message  = True
+            last_heartbeat = datetime.now()
+            msg_count      = 0
+            try:
+                connector = aiohttp.TCPConnector(ssl=False)
+                async with aiohttp.ClientSession(connector=connector) as session:
+                    async with session.ws_connect(url, heartbeat=180) as ws:
+                        logger.info(f"[LiveFeed-{self.interval}] WS bắt tay thành công ({len(chunk)} coin), "
+                                    f"đang chờ dữ liệu đầu tiên...")
+                        async for msg in ws:
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                payload = json.loads(msg.data)
+                                data = payload.get("data", payload)
+                                k = data.get("k")
+                                if k is None:
+                                    continue
+                                msg_count += 1
+                                if first_message:
+                                    first_message = False
+                                    print(f"✅ [LiveFeed-{self.interval}] Đã NHẬN được dữ liệu real-time từ Binance "
+                                          f"({len(chunk)} coin) — mẫu: {data['s']} close={k['c']} "
+                                          f"đóng={k['x']}")
+                                    logger.info(f"[LiveFeed-{self.interval}] Xác nhận nhận dữ liệu real-time OK "
+                                                f"({len(chunk)} coin) — mẫu: {data['s']} close={k['c']}")
 
-            # Retry sau 10s — chỉ cho các coin bị miss, không quét lại toàn bộ
-            missed = [s for s in self.symbols if s not in self._last_close
-                      or self._last_close[s] < self._expected_close_ms()]
-            if missed:
-                logger.info(f"[{self.interval_display}] Retry {len(missed)} coin bị miss sau 10s...")
-                await asyncio.sleep(10)
-                await self._poll_all(cb, symbols=missed)
+                                now = datetime.now()
+                                if now - last_heartbeat >= timedelta(minutes=WS_HEARTBEAT_MINUTES):
+                                    last_heartbeat = now
+                                    print(f"✅ [LiveFeed-{self.interval}] Vẫn đang kết nối Binance OK "
+                                          f"({len(chunk)} coin, đã nhận {msg_count} update) — "
+                                          f"mẫu: {data['s']} close={k['c']}")
+                                    logger.info(f"[LiveFeed-{self.interval}] Heartbeat — vẫn kết nối OK "
+                                                f"({len(chunk)} coin, {msg_count} update đã nhận)")
 
-    def _expected_close_ms(self) -> int:
-        """Close time ms của nến vừa đóng."""
-        now_ms = int(datetime.now().timestamp() * 1000)
-        return (now_ms // self._interval_ms) * self._interval_ms - 1
+                                await self._handle_kline_event(data["s"], k)
+                            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE,
+                                               aiohttp.WSMsgType.ERROR):
+                                raise ConnectionError(f"WS đóng/lỗi: {msg}")
+            except Exception as e:
+                logger.error(f"[LiveFeed-{self.interval}] WS lỗi ({len(chunk)} coin), "
+                             f"đồng bộ lại + kết nối lại sau {WS_RECONNECT_DELAY_SEC}s: {e}")
+                try:
+                    await self._fetch_history(chunk)
+                except Exception as e2:
+                    logger.error(f"[LiveFeed-{self.interval}] Đồng bộ lại thất bại: {e2}")
+                await asyncio.sleep(WS_RECONNECT_DELAY_SEC)
+
+    async def run(self) -> None:
+        await self._fetch_history(self.symbols)
+        chunks = [self.symbols[i:i + WS_MAX_STREAMS_PER_CONN]
+                  for i in range(0, len(self.symbols), WS_MAX_STREAMS_PER_CONN)]
+        logger.info(f"[LiveFeed-{self.interval}] Mở {len(chunks)} kết nối WS cho {len(self.symbols)} coin")
+        await asyncio.gather(*(self._run_connection(c) for c in chunks))
 
 # ═══════════════════════════════════════════════
 #  SCANNER
 # ═══════════════════════════════════════════════
-async def resolve_symbols() -> list[str]:
+async def resolve_symbols(count: int = TOP_SYMBOLS_COUNT) -> list[str]:
     if AUTO_TOP_SYMBOLS:
-        logger.info(f"Lấy top {TOP_SYMBOLS_COUNT} cặp từ Binance...")
-        symbols = await fetch_top_symbols(TOP_SYMBOLS_COUNT)
+        logger.info(f"Lấy top {count} cặp từ Binance...")
+        symbols = await fetch_top_symbols(count)
         if not symbols:
             logger.warning("Không lấy được, dùng danh sách cố định")
             symbols = list(SYMBOLS)
@@ -456,20 +569,20 @@ async def resolve_symbols() -> list[str]:
 
 
 class Scanner:
-    def __init__(self, symbols: list[str], interval: str, interval_display: str,
+    """Xử lý tín hiệu cho 1 bộ điều kiện (LONG-H1 / SHORT-H1 / SHORT-H1 cũ). Không tự lấy
+    dữ liệu — nhận candles từ LiveFeed dùng chung qua on_closed_candle/on_live_tick."""
+
+    def __init__(self, symbols: list[str], interval_display: str,
                  chat_id: str, detect_fn: Callable[[str, list[dict]], Signal | None],
                  tp_pct: float, sl_pct: float,
-                 message_builder: Callable[[Signal, str, float], str] = _build_message,
-                 poll_offset_sec: float = 0.0) -> None:
-        self.symbols          = symbols
-        self.interval         = interval
+                 message_builder: Callable[[Signal, str, float], str] = _build_message) -> None:
+        self.symbols          = {s.upper() for s in symbols}
         self.interval_display = interval_display
         self.chat_id          = chat_id
         self.detect_fn        = detect_fn
         self.tp_pct           = tp_pct
         self.sl_pct           = sl_pct
         self.message_builder  = message_builder
-        self.poll_offset_sec  = poll_offset_sec
         self._last_alert: dict[str, datetime] = {}
         self._positions: dict[str, Position] = {}   # symbol -> lệnh đang mở
 
@@ -481,35 +594,24 @@ class Scanner:
         return max(0, int(remaining.total_seconds()))
 
     async def _check_position(self, symbol: str, candle: dict) -> None:
-        """Sau mỗi nến mới, kiểm tra lệnh đang mở của coin này đã chạm TP hay SL chưa."""
+        """Kiểm tra lệnh đang mở của coin này đã chạm TP hay SL chưa (gọi được cả lúc
+        nến đóng lẫn real-time theo từng tick giá)."""
         pos = self._positions.get(symbol)
         if pos is None:
             return
-
-        if pos.direction == "SHORT":
-            hit_tp = candle["low"]  <= pos.tp
-            hit_sl = candle["high"] >= pos.sl
-        else:
-            hit_tp = candle["high"] >= pos.tp
-            hit_sl = candle["low"]  <= pos.sl
-
-        if not (hit_tp or hit_sl):
+        hit = _position_hit(pos, candle)
+        if hit is None:
             return
-
-        if hit_tp and hit_sl:
-            # Cả 2 mốc bị chạm trong cùng 1 nến — ước lượng theo hướng nến để chọn mốc chạm trước
-            bearish = candle["close"] <= candle["open"]
-            hit: Literal["TP", "SL"] = ("TP" if bearish else "SL") if pos.direction == "SHORT" \
-                else ("SL" if bearish else "TP")
-        else:
-            hit = "TP" if hit_tp else "SL"
 
         logger.info(f"[{self.interval_display}] {symbol} {pos.direction} {hit} | "
                     f"Entry={pos.entry:.4f}  {hit}={(pos.tp if hit == 'TP' else pos.sl):.4f}")
         await send_close_alert(pos, self.chat_id, self.interval_display, hit)
         del self._positions[symbol]
 
-    async def on_candle(self, symbol: str, candles: list[dict]) -> None:
+    async def on_closed_candle(self, symbol: str, candles: list[dict]) -> None:
+        if symbol not in self.symbols:
+            return
+
         await self._check_position(symbol, candles[-1])
         if symbol in self._positions:
             return   # Lệnh của coin này vẫn đang mở, chưa tìm tín hiệu mới
@@ -541,130 +643,194 @@ class Scanner:
                     f"Entry={signal.price} | TP={tp} | SL={signal.sl}")
         await send_signal(signal, self.chat_id, self.interval_display, tp, self.message_builder)
 
-    async def run(self) -> None:
-        client = BinanceClient(
-            self.symbols, self.interval, CANDLE_BUFFER,
-            interval_display=self.interval_display, poll_offset_sec=self.poll_offset_sec,
+    async def on_live_tick(self, symbol: str, candles: list[dict], live_candle: dict) -> None:
+        """Check TP/SL real-time theo từng tick giá, không chờ nến đóng."""
+        if symbol not in self.symbols:
+            return
+        await self._check_position(symbol, live_candle)
+
+
+class SpikeScanner:
+    """Phát hiện nến biến động đột biến xuyên BB trên/dưới ngay khi đang hình thành,
+    báo tín hiệu ngay lập tức — không chờ đóng nến, không chờ rút râu (xem detect_spike_signal)."""
+
+    def __init__(self, symbols: list[str], chat_id: str, tp_pct: float, sl_pct: float,
+                 direction: Literal["LONG", "SHORT"] = "SHORT") -> None:
+        self.symbols   = {s.upper() for s in symbols}
+        self.chat_id   = chat_id
+        self.tp_pct    = tp_pct
+        self.sl_pct    = sl_pct
+        self.direction = direction
+        self._last_alert: dict[str, datetime] = {}
+        self._positions: dict[str, Position] = {}
+
+    def _cooldown_left(self, symbol: str) -> int:
+        last = self._last_alert.get(symbol)
+        if last is None:
+            return 0
+        remaining = timedelta(minutes=ALERT_COOLDOWN_MINUTES) - (datetime.now() - last)
+        return max(0, int(remaining.total_seconds()))
+
+    async def _check_position(self, symbol: str, candle: dict) -> None:
+        pos = self._positions.get(symbol)
+        if pos is None:
+            return
+        hit = _position_hit(pos, candle)
+        if hit is None:
+            return
+
+        logger.info(f"[SPIKE] {symbol} {pos.direction} {hit} | "
+                    f"Entry={pos.entry:.4f}  {hit}={(pos.tp if hit == 'TP' else pos.sl):.4f}")
+        await send_close_alert(pos, self.chat_id, INTERVAL_H1_DISPLAY, hit)
+        del self._positions[symbol]
+
+    async def on_closed_candle(self, symbol: str, candles: list[dict]) -> None:
+        if symbol not in self.symbols:
+            return
+        await self._check_position(symbol, candles[-1])
+
+    async def on_live_tick(self, symbol: str, candles: list[dict], live_candle: dict) -> None:
+        if symbol not in self.symbols:
+            return
+
+        await self._check_position(symbol, live_candle)
+        if symbol in self._positions:
+            return   # Lệnh của coin này vẫn đang mở, chưa tìm tín hiệu mới
+
+        signal = detect_spike_signal(symbol, candles, live_candle, direction=self.direction)
+        if signal is None:
+            return
+
+        left = self._cooldown_left(symbol)
+        if left > 0:
+            return
+
+        self._last_alert[symbol] = datetime.now()
+
+        if signal.direction == "SHORT":
+            tp = signal.price * (1 - self.tp_pct)
+            signal.sl = signal.price * (1 + self.sl_pct)
+        else:
+            tp = signal.price * (1 + self.tp_pct)
+            signal.sl = signal.price * (1 - self.sl_pct)
+        self._positions[symbol] = Position(
+            symbol=symbol, direction=signal.direction, entry=signal.price,
+            tp=tp, sl=signal.sl, opened_at=datetime.now(),
         )
-        logger.info(f"[{self.interval_display}] Sẵn sàng — theo dõi {len(client.symbols)} cặp")
-        await client.run(self.on_candle)
+
+        logger.info(f">>> [SPIKE] TÍN HIỆU: {symbol} {signal.direction} (đột biến) | "
+                    f"Entry={signal.price} | TP={tp} | SL={signal.sl}")
+        await send_signal(signal, self.chat_id, INTERVAL_H1_DISPLAY, tp, _build_spike_message)
 
 # ═══════════════════════════════════════════════
 #  ENTRY POINT
 # ═══════════════════════════════════════════════
 def _banner() -> None:
     logger.info("=" * 50)
-    logger.info("  Binance Futures Song Kiem Signal Bot")
+    logger.info("  Binance Futures Song Kiem Signal Bot (WebSocket real-time)")
     logger.info("=" * 50)
     if AUTO_TOP_SYMBOLS:
-        logger.info(f"  Symbol    : Tự động top {TOP_SYMBOLS_COUNT}")
+        logger.info(f"  Symbol    : Tự động top {TOP_SYMBOLS_COUNT} (LONG/SHORT) | top {LEGACY_TOP_SYMBOLS_COUNT} (SHORT cũ)")
     else:
         logger.info(f"  Symbol    : Thủ công {len(SYMBOLS)} cặp")
-    logger.info(f"  Timeframe : {INTERVAL_H1_DISPLAY}  (chạy cho cả 3 kèo)")
-    logger.info(f"  LONG/SHORT mới (chạm BB) -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID else 'OK'}  "
+    logger.info(f"  Timeframe : {INTERVAL_H1_DISPLAY}  (chạy cho cả 5 kèo, 1 LiveFeed dùng chung)")
+    logger.info(f"  LONG/SHORT mới (chạm BB)   -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID else 'OK'}  "
                 f"TP/SL={NEW_TP_PCT*100:.1f}%/{NEW_SL_PCT*100:.1f}%")
-    logger.info(f"  SHORT cũ (bám biên giữa)  -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID_H1 else 'OK'}  "
+    logger.info(f"  LONG/SHORT đột biến (real-time) -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID_SPIKE else 'OK'}  "
+                f"TP/SL={NEW_TP_PCT*100:.1f}%/{NEW_SL_PCT*100:.1f}%  "
+                f"range>={SPIKE_RANGE_MULT}x  vol>={SPIKE_VOL_MULT}x")
+    logger.info(f"  SHORT cũ (bám biên giữa)   -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID_H1 else 'OK'}  "
                 f"TP/SL={LEGACY_TP_PCT*100:.1f}%/{LEGACY_SL_PCT*100:.1f}%")
     logger.info(f"  BB        : period={BB_PERIOD}  std={BB_STD}")
     logger.info(f"  Cooldown  : {ALERT_COOLDOWN_MINUTES} phút")
     logger.info("=" * 50)
 
 
-async def _send_startup_message_to(chat_id: str, label: str, text: str) -> None:
+async def _check_telegram_connection(chat_id: str, label: str) -> None:
+    """Chỉ kiểm tra token + chat_id có hợp lệ không (qua getChat) — KHÔNG gửi tin nhắn vào chat."""
     if not TELEGRAM_TOKEN or not chat_id:
         print("=" * 50)
         print(f"  [LỖI] Chưa điền TELEGRAM_TOKEN hoặc chat ID cho {label}")
         print("=" * 50)
+        logger.warning(f"[TG-{label}] Chưa cấu hình TELEGRAM_TOKEN / chat ID")
         return
-    url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getChat"
     print(f"  Đang kiểm tra kết nối Telegram ({label})...")
     try:
         connector = aiohttp.TCPConnector(ssl=False)
         async with aiohttp.ClientSession(connector=connector) as session:
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(url, params={"chat_id": chat_id},
+                                    timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
-                    print("=" * 50)
                     print(f"  [TELEGRAM] Kết nối thành công ✓ ({label})")
-                    print("  Tin nhắn khởi động đã gửi vào Telegram")
-                    print("=" * 50)
-                    logger.info(f"[TG-{label}] Gửi tin khởi động thành công")
+                    logger.info(f"[TG-{label}] Kết nối Telegram OK (chat_id={chat_id})")
                 else:
                     body = await resp.text()
-                    print("=" * 50)
-                    print(f"  [LỖI TELEGRAM] HTTP {resp.status} ({label})")
-                    print(f"  Chi tiết: {body}")
-                    print(f"  Kiểm tra lại TELEGRAM_TOKEN và chat ID cho {label}")
-                    print("=" * 50)
+                    print(f"  [LỖI TELEGRAM] HTTP {resp.status} ({label}) — kiểm tra lại token/chat ID")
                     logger.error(f"[TG-{label}] Lỗi {resp.status}: {body}")
     except Exception as e:
-        print("=" * 50)
         print(f"  [LỖI TELEGRAM] Không kết nối được ({label}): {e}")
-        print("  Kiểm tra lại token và chat ID")
-        print("=" * 50)
-        logger.error(f"[TG-{label}] Không gửi được: {e}")
+        logger.error(f"[TG-{label}] Không kết nối được: {e}")
 
 
-async def _send_startup_message() -> None:
-    watch_desc = 'Top ' + str(TOP_SYMBOLS_COUNT) + ' coin' if AUTO_TOP_SYMBOLS else str(len(SYMBOLS)) + ' coin'
-
-    text_new = (
-        "✅ *Bot đã khởi động*\n\n"
-        f"Timeframe: `{INTERVAL_H1_DISPLAY}`\n"
-        f"Theo dõi: `{watch_desc}`\n"
-        f"Cooldown: `{ALERT_COOLDOWN_MINUTES} phút`\n"
-        f"TP/SL: `{NEW_TP_PCT*100:.1f}% / {NEW_SL_PCT*100:.1f}%`\n\n"
-        "Đang chờ tín hiệu LONG + SHORT (chạm BB)..."
-    )
-    await _send_startup_message_to(TELEGRAM_CHAT_ID, "NEW-H1", text_new)
-
-    text_legacy = (
-        "✅ *Bot đã khởi động*\n\n"
-        f"Timeframe: `{INTERVAL_H1_DISPLAY}`\n"
-        f"Theo dõi: `{watch_desc}`\n"
-        f"Cooldown: `{ALERT_COOLDOWN_MINUTES} phút`\n"
-        f"TP/SL: `{LEGACY_TP_PCT*100:.1f}% / {LEGACY_SL_PCT*100:.1f}%`\n\n"
-        "Đang chờ tín hiệu SHORT (cũ)..."
-    )
-    await _send_startup_message_to(TELEGRAM_CHAT_ID_H1, "LEGACY-SHORT-H1", text_legacy)
+async def _check_telegram_connections() -> None:
+    await _check_telegram_connection(TELEGRAM_CHAT_ID, "NEW-H1")
+    await _check_telegram_connection(TELEGRAM_CHAT_ID_H1, "LEGACY-SHORT-H1")
+    await _check_telegram_connection(TELEGRAM_CHAT_ID_SPIKE, "SPIKE")
 
 
-async def _run_forever(label: str, scanner) -> None:
-    """Chạy 1 scanner vô hạn; nếu crash bất ngờ thì log + khởi động lại thay vì
-    kéo sập luôn scanner còn lại (asyncio.gather sẽ hủy toàn bộ nếu 1 task raise)."""
+async def _run_forever(label: str, feed: LiveFeed) -> None:
+    """Chạy LiveFeed vô hạn; nếu crash bất ngờ (hiếm, vì LiveFeed đã tự retry nội bộ)
+    thì log + khởi động lại thay vì để cả bot dừng hẳn."""
     while True:
         try:
-            await scanner.run()
+            await feed.run()
         except Exception as e:
-            logger.critical(f"[{label}] Scanner dừng bất ngờ, khởi động lại sau 10s: {e}", exc_info=True)
+            logger.critical(f"[{label}] LiveFeed dừng bất ngờ, khởi động lại sau 10s: {e}", exc_info=True)
             await asyncio.sleep(10)
 
 
 async def _main() -> None:
     _banner()
-    await _send_startup_message()
+    await _check_telegram_connections()
     try:
-        symbols = await resolve_symbols()
-        await asyncio.gather(
-            _run_forever("LONG-H1", Scanner(
-                symbols, INTERVAL_H1, INTERVAL_H1_DISPLAY, TELEGRAM_CHAT_ID,
-                detect_fn=lambda s, c: detect_signal(s, c, direction="LONG"),
-                tp_pct=NEW_TP_PCT, sl_pct=NEW_SL_PCT,
-            )),
-            _run_forever("SHORT-H1", Scanner(
-                symbols, INTERVAL_H1, INTERVAL_H1_DISPLAY, TELEGRAM_CHAT_ID,
-                detect_fn=lambda s, c: detect_signal(s, c, direction="SHORT"),
-                tp_pct=NEW_TP_PCT, sl_pct=NEW_SL_PCT,
-                poll_offset_sec=H1_POLL_STAGGER_SEC,
-            )),
-            _run_forever("LEGACY-SHORT-H1", Scanner(
-                symbols, INTERVAL_H1, INTERVAL_H1_DISPLAY, TELEGRAM_CHAT_ID_H1,
-                detect_fn=detect_legacy_signal,
-                tp_pct=LEGACY_TP_PCT, sl_pct=LEGACY_SL_PCT,
-                message_builder=_build_legacy_message,
-                poll_offset_sec=H1_POLL_STAGGER_SEC * 2,
-            )),
+        symbols        = await resolve_symbols(TOP_SYMBOLS_COUNT)
+        legacy_symbols = await resolve_symbols(LEGACY_TOP_SYMBOLS_COUNT)
+        all_symbols    = sorted(set(symbols) | set(legacy_symbols))
+
+        feed = LiveFeed(all_symbols, INTERVAL_H1, CANDLE_BUFFER)
+
+        long_scanner = Scanner(
+            symbols, INTERVAL_H1_DISPLAY, TELEGRAM_CHAT_ID,
+            detect_fn=lambda s, c: detect_signal(s, c, direction="LONG"),
+            tp_pct=NEW_TP_PCT, sl_pct=NEW_SL_PCT,
         )
+        short_scanner = Scanner(
+            symbols, INTERVAL_H1_DISPLAY, TELEGRAM_CHAT_ID,
+            detect_fn=lambda s, c: detect_signal(s, c, direction="SHORT"),
+            tp_pct=NEW_TP_PCT, sl_pct=NEW_SL_PCT,
+        )
+        legacy_scanner = Scanner(
+            legacy_symbols, INTERVAL_H1_DISPLAY, TELEGRAM_CHAT_ID_H1,
+            detect_fn=detect_legacy_signal,
+            tp_pct=LEGACY_TP_PCT, sl_pct=LEGACY_SL_PCT,
+            message_builder=_build_legacy_message,
+        )
+        spike_long_scanner = SpikeScanner(
+            symbols, TELEGRAM_CHAT_ID_SPIKE, tp_pct=NEW_TP_PCT, sl_pct=NEW_SL_PCT,
+            direction="LONG",
+        )
+        spike_short_scanner = SpikeScanner(
+            symbols, TELEGRAM_CHAT_ID_SPIKE, tp_pct=NEW_TP_PCT, sl_pct=NEW_SL_PCT,
+            direction="SHORT",
+        )
+
+        for sc in (long_scanner, short_scanner, legacy_scanner,
+                   spike_long_scanner, spike_short_scanner):
+            feed.on_closed_candle(sc.on_closed_candle)
+            feed.on_live_tick(sc.on_live_tick)
+
+        await _run_forever("LiveFeed", feed)
     except KeyboardInterrupt:
         logger.info("Bot dừng.")
     except Exception as e:
