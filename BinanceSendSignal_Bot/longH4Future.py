@@ -45,7 +45,7 @@ BAND_CROSS_MIN_RATIO      = 0.1   # Phần xuyên qua BB trên/dưới tối thi
 LEGACY_BAND_CROSS_MIN_RATIO = 0.9   # Kèo cũ (vượt biên): phần nến nằm ngoài BB tối thiểu 90% biên độ nến (high-low)
 
 SPIKE_LOOKBACK   = 10   # Số nến gần nhất dùng để tính biên độ/volume trung bình
-SPIKE_RANGE_MULT = 6    # Biên độ nến đột biến tối thiểu gấp 6 lần trung bình
+SPIKE_RANGE_MULT = 7    # Biên độ nến đột biến tối thiểu gấp 7 lần trung bình
 SPIKE_VOL_MULT   = 4    # Khối lượng đột biến tối thiểu gấp 4 lần trung bình (khoảng 4-5 lần)
 
 MIN_CANDLES_FOR_SIGNAL = BB_PERIOD + 5  # Số nến tối thiểu cần có trước khi bắt đầu xét tín hiệu
