@@ -13,6 +13,21 @@ from typing import Awaitable, Callable, Literal, TypedDict
 
 import aiohttp
 
+try:
+    from executor import ENABLE_AUTO_TRADE, TradeExecutor
+except ImportError:
+    # Chưa cài python-binance / chưa có executor.py -> bot vẫn chạy bình thường,
+    # chỉ không có phần tự động đặt lệnh (chỉ gửi Telegram như trước giờ).
+    ENABLE_AUTO_TRADE = False
+    TradeExecutor = None
+
+# TODO(demo-test): TẠM BẬT trong lúc test demo — kênh Spike hiển thị NHƯ BÌNH THƯỜNG
+# (báo tín hiệu + TP/SL theo nến, bất kể có executor hay không); executor vẫn chạy
+# ngầm đặt lệnh demo thật nhưng CHỈ GHI LOG, không gửi Telegram. Sau khi test xong,
+# đổi lại thành False để trả về hành vi gốc: có executor thì CHỈ báo theo lệnh thật
+# (xem các chỗ dùng biến này trong SpikeScanner và _main()).
+EXECUTOR_SILENT_DURING_TEST = True
+
 # ═══════════════════════════════════════════════
 #  CẤU HÌNH — chỉnh ở đây
 # ═══════════════════════════════════════════════
@@ -486,6 +501,7 @@ class LiveFeed:
             "open": float(k["o"]), "high": float(k["h"]),
             "low":  float(k["l"]), "close": float(k["c"]),
             "volume": float(k["v"]),
+            "bar_open": int(k["t"]),   # mốc mở nến (ms, do Binance cấp) — dùng để nhận diện "cùng 1 nến"
         }
         if len(self.candles[symbol]) < MIN_CANDLES_FOR_SIGNAL:
             return
@@ -673,17 +689,16 @@ class Scanner:
 
 
 class SpikeScanner:
-    """Phát hiện nến biến động đột biến xuyên BB trên/dưới ngay khi đang hình thành,
-    báo tín hiệu ngay lập tức — không chờ đóng nến, không chờ rút râu (xem detect_spike_signal)."""
 
     def __init__(self, symbols: list[str], chat_id: str, tp_pct: float, sl_pct: float,
-                 direction: Literal["LONG", "SHORT"] = "SHORT") -> None:
+                 executor=None) -> None:
         self.symbols   = {s.upper() for s in symbols}
         self.chat_id   = chat_id
         self.tp_pct    = tp_pct
         self.sl_pct    = sl_pct
-        self.direction = direction
+        self.executor  = executor   # TradeExecutor | None — nếu có, tự đặt lệnh demo/testnet khi có tín hiệu
         self._last_alert: dict[str, datetime] = {}
+        self._last_signal_bar: dict[str, int] = {}   # symbol -> bar_open đã gửi tín hiệu
         self._positions: dict[str, Position] = {}
 
     def _cooldown_left(self, symbol: str) -> int:
@@ -703,7 +718,11 @@ class SpikeScanner:
 
         logger.info(f"[SPIKE] {symbol} {pos.direction} {hit} | "
                     f"Entry={pos.entry:.4f}  {hit}={(pos.tp if hit == 'TP' else pos.sl):.4f}")
-        await send_close_alert(pos, self.chat_id, INTERVAL_H1_DISPLAY, hit)
+        if self.executor is None or EXECUTOR_SILENT_DURING_TEST:
+            # Có executor -> bình thường lệnh thật đã khớp sẽ tự báo qua User Data Stream
+            # (giá/PnL chính xác hơn ước lượng theo nến này) -> khỏi báo trùng ở đây.
+            # (Trong lúc EXECUTOR_SILENT_DURING_TEST=True thì vẫn báo như cũ — xem TODO đầu file.)
+            await send_close_alert(pos, self.chat_id, INTERVAL_H1_DISPLAY, hit)
         del self._positions[symbol]
 
     async def on_closed_candle(self, symbol: str, candles: list[dict]) -> None:
@@ -719,7 +738,12 @@ class SpikeScanner:
         if symbol in self._positions:
             return   # Lệnh của coin này vẫn đang mở, chưa tìm tín hiệu mới
 
-        signal = detect_spike_signal(symbol, candles, live_candle, direction=self.direction)
+        bar_open = live_candle.get("bar_open")
+        if bar_open is not None and self._last_signal_bar.get(symbol) == bar_open:
+            return   # Nến này đã có 1 tín hiệu đột biến (Long hoặc Short) gửi rồi — bỏ qua
+
+        signal = (detect_spike_signal(symbol, candles, live_candle, direction="SHORT")
+                  or detect_spike_signal(symbol, candles, live_candle, direction="LONG"))
         if signal is None:
             return
 
@@ -728,6 +752,8 @@ class SpikeScanner:
             return
 
         self._last_alert[symbol] = datetime.now()
+        if bar_open is not None:
+            self._last_signal_bar[symbol] = bar_open
 
         if signal.direction == "SHORT":
             tp = signal.price * (1 - self.tp_pct)
@@ -742,7 +768,19 @@ class SpikeScanner:
 
         logger.info(f">>> [SPIKE] TÍN HIỆU: {symbol} {signal.direction} (đột biến) | "
                     f"Entry={signal.price} | TP={tp} | SL={signal.sl}")
-        await send_signal(signal, self.chat_id, INTERVAL_H1_DISPLAY, tp, _build_spike_message)
+
+        if self.executor is None or EXECUTOR_SILENT_DURING_TEST:
+            # Bình thường có executor thì chỉ báo khi lệnh THẬT khớp (executor tự gửi),
+            # khỏi báo tín hiệu "dự đoán" song song ở đây — tránh trùng/nhiễu.
+            # (Trong lúc EXECUTOR_SILENT_DURING_TEST=True thì vẫn báo như cũ — xem TODO đầu file.)
+            await send_signal(signal, self.chat_id, INTERVAL_H1_DISPLAY, tp, _build_spike_message)
+
+        if self.executor is not None:
+            asyncio.create_task(self.executor.open_position(
+                symbol=symbol, direction=signal.direction,
+                entry_price=signal.price, sl_price=signal.sl, tp_price=tp,
+                sl_pct=self.sl_pct, tp_pct=self.tp_pct,
+            ))
 
 # ═══════════════════════════════════════════════
 #  ENTRY POINT
@@ -848,21 +886,36 @@ async def _main() -> None:
             cooldown_minutes=LEGACY_ALERT_COOLDOWN_MINUTES,
             message_builder=_build_legacy_message,
         )
-        spike_long_scanner = SpikeScanner(
+        executor = None
+        if ENABLE_AUTO_TRADE and TradeExecutor is not None:
+            if EXECUTOR_SILENT_DURING_TEST:
+                # TODO(demo-test): chỉ ghi log, không gửi Telegram — xem TODO đầu file.
+                async def notify(text: str) -> None:
+                    logger.info(f"[Executor-DEMO] {text}")
+            else:
+                notify = lambda text: _send_telegram_message(TELEGRAM_CHAT_ID_SPIKE, text, "EXECUTOR")
+            executor = await TradeExecutor.create(notify)
+            logger.warning("[Executor] AUTO-TRADE ĐANG BẬT — bot sẽ tự đặt lệnh (xem executor.py để kiểm tra testnet/thật)")
+            await executor.reconcile_on_startup(set(symbols))
+
+        spike_scanner = SpikeScanner(
             symbols, TELEGRAM_CHAT_ID_SPIKE, tp_pct=SPIKE_TP_PCT, sl_pct=SPIKE_SL_PCT,
-            direction="LONG",
-        )
-        spike_short_scanner = SpikeScanner(
-            symbols, TELEGRAM_CHAT_ID_SPIKE, tp_pct=SPIKE_TP_PCT, sl_pct=SPIKE_SL_PCT,
-            direction="SHORT",
+            executor=executor,
         )
 
         for sc in (long_scanner, short_scanner, legacy_long_scanner, legacy_short_scanner,
-                   spike_long_scanner, spike_short_scanner):
+                   spike_scanner):
             feed.on_closed_candle(sc.on_closed_candle)
             feed.on_live_tick(sc.on_live_tick)
 
-        await _run_forever("LiveFeed", feed)
+        if executor is not None:
+            await asyncio.gather(
+                _run_forever("LiveFeed", feed),
+                executor.run_user_data_stream(),
+                executor.run_reconciliation_loop(),
+            )
+        else:
+            await _run_forever("LiveFeed", feed)
     except KeyboardInterrupt:
         logger.info("Bot dừng.")
     except Exception as e:
