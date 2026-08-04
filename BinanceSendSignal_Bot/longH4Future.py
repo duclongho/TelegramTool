@@ -890,13 +890,17 @@ async def _main() -> None:
         )
         executor = None
         if ENABLE_AUTO_TRADE and TradeExecutor is not None:
+            # notify_always: LUÔN gửi Telegram thật, kể cả lúc EXECUTOR_SILENT_DURING_TEST
+            # đang bật — dùng cho cảnh báo cần thấy ngay (vd: symbol không giao dịch được
+            # trên Demo Trading), khác với notify (báo kết quả lệnh, tôn trọng cờ silent).
+            notify_always = lambda text: _send_telegram_message(TELEGRAM_CHAT_ID_SPIKE, text, "EXECUTOR-INFO")
             if EXECUTOR_SILENT_DURING_TEST:
                 # TODO(demo-test): chỉ ghi log, không gửi Telegram — xem TODO đầu file.
                 async def notify(text: str) -> None:
                     logger.info(f"[Executor-DEMO] {text}")
             else:
                 notify = lambda text: _send_telegram_message(TELEGRAM_CHAT_ID_SPIKE, text, "EXECUTOR")
-            executor = await TradeExecutor.create(notify)
+            executor = await TradeExecutor.create(notify, notify_always)
             logger.warning("[Executor] AUTO-TRADE ĐANG BẬT — bot sẽ tự đặt lệnh (xem executor.py để kiểm tra testnet/thật)")
             await executor.reconcile_on_startup(set(symbols))
 
@@ -914,7 +918,7 @@ async def _main() -> None:
             await asyncio.gather(
                 _run_forever("LiveFeed", feed),
                 executor.run_user_data_stream(),
-                executor.run_reconciliation_loop(),
+                executor.run_reconciliation_loop(set(symbols)),
             )
         else:
             await _run_forever("LiveFeed", feed)

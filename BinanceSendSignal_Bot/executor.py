@@ -34,8 +34,8 @@ USE_DEMO_TRADING  = True    # True = Demo Trading (tiền ảo, endpoint demo-fa
 # Lấy tại: đăng nhập binance.com bằng tài khoản Binance THẬT của bạn (không phải tài khoản
 # riêng nữa) -> vào mục Demo Trading (thường ở Futures hoặc trong API Management) -> tạo
 # "Demo Trading API Key". Đây là key riêng cho môi trường ảo, KHÔNG dùng chung với key thật.
-DEMO_API_KEY    = "l1vyFwTdZBKfYioAcYHFhWU8U38G4rwcmV2isuyqUq3XCWKQ5Knsg8XUSLSd7Ve2"
-DEMO_API_SECRET = "nABYNYgqZmbGyq4VkxGqHPz31D08Vx1KIzkUI1KEPmU3nJtI5GpHFikV0VXz4IBB"
+DEMO_API_KEY    = "OsTTefLTQPsOgg565RMuaSvKowP3rUCRUOY8uOz4ZLaE9BY9FqVosbXnCekkK7Zt"
+DEMO_API_SECRET = "b5IDhQ8pr0ICguGLPhr1vEtbXInXHQ84lsJFEGT59JvN0xnxk62l8aMQXSEJahju"
 
 RISK_PCT_PER_TRADE = 0.01   # 1% vốn khả dụng / lệnh, tính theo khoảng cách entry -> SL
 LEVERAGE           = 3      # Đòn bẩy mặc định cho mọi symbol
@@ -74,12 +74,17 @@ class TradeExecutor:
     """Đặt lệnh MARKET vào lệnh + STOP_MARKET/TAKE_PROFIT_MARKET (closePosition=True) để
     thoát lệnh, theo dõi khớp lệnh qua User Data Stream để dọn lệnh còn treo + tính PnL ngày."""
 
-    def __init__(self, client: AsyncClient, notify) -> None:
+    def __init__(self, client: AsyncClient, notify, notify_always=None) -> None:
         self.client = client
-        self.notify = notify   # async callable(str) -> gửi Telegram (dùng lại send_via_extra_bot kiểu có sẵn)
+        self.notify = notify   # async callable(str) -> gửi Telegram (tôn trọng EXECUTOR_SILENT_DURING_TEST)
+        # async callable(str) -> LUÔN gửi Telegram thật, bất kể notify có đang im lặng
+        # hay không — dùng cho cảnh báo quan trọng cần thấy ngay cả lúc đang test demo
+        # âm thầm (vd: symbol không giao dịch được trên Demo Trading).
+        self.notify_always = notify_always or notify
         self._filters_cache: dict[str, _SymbolFilters] = {}
         self._leverage_set: set[str] = set()
         self._open_positions: dict[str, dict] = {}   # symbol -> {"direction":..., "qty":...}
+        self._known_untradeable: set[str] = set()   # symbol không giao dịch được trên Demo Trading (đã xác nhận)
         self._daily_pnl       = 0.0
         self._daily_pnl_date  = date.today()
         self._equity_day_start: Optional[float] = None
@@ -87,15 +92,23 @@ class TradeExecutor:
         self._cached_balance: Optional[float] = None   # cập nhật cục bộ, tránh gọi REST mỗi lần vào lệnh
 
     @classmethod
-    async def create(cls, notify) -> "TradeExecutor":
+    async def create(cls, notify, notify_always=None) -> "TradeExecutor":
         # demo=True (KHÔNG phải testnet=True — đó là endpoint cũ đã bị Binance khai tử)
         client = await AsyncClient.create(
             DEMO_API_KEY, DEMO_API_SECRET, demo=USE_DEMO_TRADING,
         )
-        self = cls(client, notify)
+        self = cls(client, notify, notify_always)
         await self._preload_filters()
         self._cached_balance = await self._fetch_balance()
         return self
+
+    async def _mark_untradeable(self, symbol: str, reason: str) -> None:
+        """Đánh dấu symbol không giao dịch được trên Demo Trading — chỉ báo Telegram
+        1 lần/symbol (tránh spam lặp lại mỗi lần có tín hiệu mới cho cùng symbol)."""
+        if symbol in self._known_untradeable:
+            return
+        self._known_untradeable.add(symbol)
+        await self.notify_always(f"⚠️ {symbol}: Cặp này không có trên giao dịch demo ({reason})")
 
     async def close(self) -> None:
         await self.client.close_connection()
@@ -197,26 +210,27 @@ class TradeExecutor:
                 self.auto_trade_enabled = True
                 logger.info("[Executor] Sang ngày mới — bật lại auto-trade (đã bị tắt do chạm giới hạn lỗ ngày hôm qua)")
 
-    # --- NHẬN THEO DÕI VỊ THẾ ĐÃ MỞ SẴN LÚC KHỞI ĐỘNG ---
-    async def reconcile_on_startup(self, symbols: set[str]) -> None:
-        """Gọi 1 lần lúc khởi động: quét vị thế đang mở thật trên sàn cho các symbol bot
-        theo dõi, đưa vào _open_positions để tiếp tục theo dõi (đặt bổ sung SL/TP nếu
-        thiếu). Bắt buộc phải có bước này — nếu bot khởi động lại (crash/restart) hoặc có
-        vị thế mở tay/test từ trước, _open_positions rỗng sẽ khiến bot KHÔNG BAO GIỜ phát
-        hiện được khi các vị thế đó đóng (đã xác nhận qua thực tế khi debug executor này)."""
-        if not ENABLE_AUTO_TRADE:
-            return
+    # --- NHẬN THEO DÕI VỊ THẾ MỒ CÔI (chưa có trong _open_positions) ---
+    async def _scan_and_adopt_orphaned_positions(self, symbols: set[str], context: str) -> None:
+        """Quét TOÀN BỘ vị thế đang mở thật trên sàn cho các symbol bot theo dõi, nhận
+        theo dõi bất kỳ vị thế nào CHƯA có trong _open_positions (đặt bổ sung SL/TP nếu
+        thiếu). Dùng chung cho lúc khởi động (reconcile_on_startup) VÀ định kỳ trong lúc
+        chạy (run_reconciliation_loop) — vì vị thế có thể trở thành "mồ côi" không chỉ
+        lúc restart mà cả lúc đang chạy: đã xác nhận thực tế với HFTUSDT, lệnh MARKET
+        khớp thật nhưng bước xác nhận khớp (so sánh vị thế trước/sau) báo sai do endpoint
+        Demo Trading trễ đồng bộ hơn dự kiến -> code tưởng không khớp, bỏ qua luôn bước
+        đặt SL/TP, để vị thế hở bảo vệ tới tận lúc bot restart mới được vá lại."""
         try:
             positions = await self.client.futures_position_information()
         except Exception as e:
-            logger.error(f"[Executor] Lỗi quét vị thế lúc khởi động: {e}")
+            logger.error(f"[Executor] Lỗi quét vị thế ({context}): {e}")
             return
 
         algo_orders: list[dict] = []
         try:
             algo_orders = await self.client.futures_get_open_algo_orders()
         except Exception as e:
-            logger.error(f"[Executor] Lỗi lấy algo orders lúc khởi động: {e}")
+            logger.error(f"[Executor] Lỗi lấy algo orders ({context}): {e}")
 
         adopted = []
         for p in positions:
@@ -224,6 +238,8 @@ class TradeExecutor:
             amt = float(p.get("positionAmt", 0))
             if amt == 0 or symbol not in symbols:
                 continue
+            if symbol in self._open_positions:
+                continue   # đã đang theo dõi rồi -> chỉ xử lý phần MỒ CÔI
 
             direction   = "LONG" if amt > 0 else "SHORT"
             entry_price = float(p["entryPrice"])
@@ -234,8 +250,8 @@ class TradeExecutor:
             has_tp = any(o["orderType"] == "TAKE_PROFIT_MARKET" for o in sym_algo)
 
             if not (has_sl and has_tp):
-                logger.warning(f"[Executor] {symbol}: vị thế có sẵn THIẾU SL/TP — đặt bổ sung "
-                                f"(dùng {DEFAULT_SL_PCT*100:.1f}%/{DEFAULT_TP_PCT*100:.1f}% mặc định)")
+                logger.warning(f"[Executor] {symbol}: vị thế mồ côi THIẾU SL/TP ({context}) — đặt "
+                                f"bổ sung (dùng {DEFAULT_SL_PCT*100:.1f}%/{DEFAULT_TP_PCT*100:.1f}% mặc định)")
                 try:
                     filters = await self._get_filters(symbol)
                     if direction == "LONG":
@@ -255,7 +271,7 @@ class TradeExecutor:
                             stopPrice=_round_step(tp_price, filters.tick_size), closePosition=True,
                         )
                 except Exception as e:
-                    logger.error(f"[Executor] {symbol}: đặt SL/TP bổ sung lúc khởi động lỗi: {e}")
+                    logger.error(f"[Executor] {symbol}: đặt SL/TP bổ sung lỗi ({context}): {e}")
 
             self._open_positions[symbol] = {
                 "direction": direction, "qty": abs(amt),
@@ -265,11 +281,19 @@ class TradeExecutor:
             adopted.append(f"{direction} {symbol} {abs(amt)}@{entry_price}")
 
         if adopted:
-            logger.warning(f"[Executor] Đã nhận theo dõi {len(adopted)} vị thế có sẵn: {', '.join(adopted)}")
+            logger.warning(f"[Executor] Đã nhận theo dõi {len(adopted)} vị thế mồ côi ({context}): "
+                            f"{', '.join(adopted)}")
             await self.notify(
-                f"🔄 [DEMO] Khởi động — đã nhận theo dõi {len(adopted)} vị thế đang mở sẵn:\n"
+                f"🔄 [DEMO] {context} — đã nhận theo dõi {len(adopted)} vị thế đang mở sẵn:\n"
                 + "\n".join(adopted)
             )
+
+    async def reconcile_on_startup(self, symbols: set[str]) -> None:
+        """Gọi 1 lần lúc khởi động — xem _scan_and_adopt_orphaned_positions để biết lý do
+        bắt buộc phải có bước này."""
+        if not ENABLE_AUTO_TRADE:
+            return
+        await self._scan_and_adopt_orphaned_positions(symbols, context="Khởi động")
 
     # --- MỞ LỆNH ---
     async def open_position(self, symbol: str, direction: Literal["LONG", "SHORT"],
@@ -287,6 +311,9 @@ class TradeExecutor:
             return
         if symbol in self._open_positions:
             return   # đã có lệnh mở cho symbol này
+        if symbol in self._known_untradeable:
+            logger.info(f"[Executor] {symbol}: đã biết không giao dịch được trên Demo Trading, bỏ qua")
+            return
         if len(self._open_positions) >= MAX_CONCURRENT_POSITIONS:
             logger.info(f"[Executor] {symbol}: bỏ qua — đã đạt tối đa {MAX_CONCURRENT_POSITIONS} lệnh mở đồng thời")
             return
@@ -309,6 +336,7 @@ class TradeExecutor:
                 # phiếu token hoá, hoặc mainnet có nhưng demo chưa niêm yết) -> bỏ qua
                 # gọn gàng, không phải lỗi hệ thống.
                 logger.info(f"[Executor] {symbol}: không có trên Demo Trading, bỏ qua tín hiệu này")
+                await self._mark_untradeable(symbol, "không có trong exchangeInfo")
                 return
             qty = _round_step(raw_qty, filters.step_size)
             if qty < float(filters.min_qty) or qty <= 0:
@@ -324,6 +352,7 @@ class TradeExecutor:
                 return
 
             if not await self._ensure_leverage(symbol):
+                await self._mark_untradeable(symbol, "đặt đòn bẩy thất bại")
                 return
 
             side          = "BUY" if direction == "LONG" else "SELL"
@@ -414,7 +443,11 @@ class TradeExecutor:
                 # (vd PLTR, BABA) cần bên người dùng tự ký thoả thuận riêng trên giao
                 # diện Binance trước, không thể xử lý qua API -> chỉ log rõ, bỏ qua.
                 logger.warning(f"[Executor] {symbol}: cần ký thoả thuận TradFi-Perps trên "
-                               f"Binance (Demo Trading) trước khi bot có thể giao dịch symbol này, bỏ qua")
+                               f"Binance trước khi bot có thể giao dịch symbol này, bỏ qua")
+                await self._mark_untradeable(symbol, "cần ký thoả thuận TradFi-Perps trên Binance")
+            elif e.code == -1121:
+                logger.error(f"[Executor] {symbol}: Binance API lỗi khi mở lệnh: {e}")
+                await self._mark_untradeable(symbol, "symbol không hợp lệ trên Demo Trading")
             else:
                 logger.error(f"[Executor] {symbol}: Binance API lỗi khi mở lệnh: {e}")
         except Exception as e:
@@ -516,13 +549,20 @@ class TradeExecutor:
 
         await self._apply_close(symbol, direction, "TP/SL", realized_pnl, note=" (qua kiểm tra định kỳ)")
 
-    async def run_reconciliation_loop(self) -> None:
+    ORPHAN_SCAN_EVERY_N_TICKS = 6   # x RECONCILE_INTERVAL_SEC (10s) = quét vị thế mồ côi mỗi ~60s
+
+    async def run_reconciliation_loop(self, symbols: set[str]) -> None:
         """Kiểm tra định kỳ vị thế qua REST — lưới an toàn dự phòng, độc lập với WS.
-        Gọi song song với run_user_data_stream() từ _main()."""
+        Gọi song song với run_user_data_stream() từ _main(). Làm 2 việc:
+        1. Mỗi 10s: kiểm tra các vị thế ĐANG THEO DÕI đã đóng chưa (bù cho WS bỏ sót).
+        2. Mỗi ~60s: quét TOÀN TÀI KHOẢN tìm vị thế MỒ CÔI (khớp thật nhưng bước xác
+           nhận báo sai nên chưa được theo dõi/bảo vệ — xem _scan_and_adopt_orphaned_positions)."""
         if not ENABLE_AUTO_TRADE:
             return
+        tick = 0
         while True:
             await asyncio.sleep(self.RECONCILE_INTERVAL_SEC)
+            tick += 1
             for symbol in list(self._open_positions.keys()):
                 try:
                     positions = await self.client.futures_position_information(symbol=symbol)
@@ -531,3 +571,6 @@ class TradeExecutor:
                         await self._handle_position_closed_externally(symbol)
                 except Exception as e:
                     logger.error(f"[Executor] {symbol}: lỗi kiểm tra định kỳ: {e}")
+
+            if tick % self.ORPHAN_SCAN_EVERY_N_TICKS == 0:
+                await self._scan_and_adopt_orphaned_positions(symbols, context="Quét định kỳ")
