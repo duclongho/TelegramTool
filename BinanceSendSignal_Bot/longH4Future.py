@@ -21,11 +21,11 @@ except ImportError:
     ENABLE_AUTO_TRADE = False
     TradeExecutor = None
 
-# TODO(demo-test): TẠM BẬT trong lúc test demo — kênh Spike hiển thị NHƯ BÌNH THƯỜNG
-# (báo tín hiệu + TP/SL theo nến, bất kể có executor hay không); executor vẫn chạy
-# ngầm đặt lệnh demo thật nhưng CHỈ GHI LOG, không gửi Telegram. Sau khi test xong,
-# đổi lại thành False để trả về hành vi gốc: có executor thì CHỈ báo theo lệnh thật
-# (xem các chỗ dùng biến này trong SpikeScanner và _main()).
+# TODO(demo-test): TẠM BẬT — kênh Spike hiển thị NHƯ BÌNH THƯỜNG (báo tín hiệu + TP/SL
+# theo nến, bất kể có executor hay không); executor vẫn chạy ngầm đặt lệnh demo thật
+# nhưng CHỈ GHI LOG, không gửi Telegram. Sau khi test xong, đổi lại thành False để trả
+# về hành vi: có executor thì CHỈ báo theo lệnh thật (xem chỗ dùng biến này trong
+# SpikeScanner.on_live_tick/_check_position và _main()).
 EXECUTOR_SILENT_DURING_TEST = True
 
 # ═══════════════════════════════════════════════
@@ -719,8 +719,8 @@ class SpikeScanner:
         logger.info(f"[SPIKE] {symbol} {pos.direction} {hit} | "
                     f"Entry={pos.entry:.4f}  {hit}={(pos.tp if hit == 'TP' else pos.sl):.4f}")
         if self.executor is None or EXECUTOR_SILENT_DURING_TEST:
-            # Có executor -> bình thường lệnh thật đã khớp sẽ tự báo qua User Data Stream
-            # (giá/PnL chính xác hơn ước lượng theo nến này) -> khỏi báo trùng ở đây.
+            # Bình thường có executor thì lệnh thật đã khớp sẽ tự báo (giá/PnL chính
+            # xác hơn ước lượng theo nến này) -> khỏi báo trùng ở đây.
             # (Trong lúc EXECUTOR_SILENT_DURING_TEST=True thì vẫn báo như cũ — xem TODO đầu file.)
             await send_close_alert(pos, self.chat_id, INTERVAL_H1_DISPLAY, hit)
         del self._positions[symbol]
@@ -770,12 +770,14 @@ class SpikeScanner:
                     f"Entry={signal.price} | TP={tp} | SL={signal.sl}")
 
         if self.executor is None or EXECUTOR_SILENT_DURING_TEST:
-            # Bình thường có executor thì chỉ báo khi lệnh THẬT khớp (executor tự gửi),
-            # khỏi báo tín hiệu "dự đoán" song song ở đây — tránh trùng/nhiễu.
+            # Bình thường có executor thì khỏi báo tín hiệu "dự đoán" song song ở đây —
+            # executor tự báo bằng giá khớp THẬT sau khi đặt lệnh (tránh trùng/nhiễu).
             # (Trong lúc EXECUTOR_SILENT_DURING_TEST=True thì vẫn báo như cũ — xem TODO đầu file.)
             await send_signal(signal, self.chat_id, INTERVAL_H1_DISPLAY, tp, _build_spike_message)
 
         if self.executor is not None:
+            # Ưu tiên: đặt lệnh lên Binance TRƯỚC, executor tự lấy giá khớp THẬT rồi
+            # mới báo (notify trong executor.py — hiện chỉ log do EXECUTOR_SILENT_DURING_TEST).
             asyncio.create_task(self.executor.open_position(
                 symbol=symbol, direction=signal.direction,
                 entry_price=signal.price, sl_price=signal.sl, tp_price=tp,

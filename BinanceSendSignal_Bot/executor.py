@@ -41,11 +41,6 @@ RISK_PCT_PER_TRADE = 0.01   # 1% vốn khả dụng / lệnh, tính theo khoản
 LEVERAGE           = 3      # Đòn bẩy mặc định cho mọi symbol
 MARGIN_TYPE         = "ISOLATED"   # ISOLATED | CROSSED
 
-# Lệnh vào chỉ khớp nếu giá thị trường CHƯA trượt quá xa so với giá lúc phát tín hiệu
-# (đặt bằng LIMIT + IOC thay vì MARKET) — khớp gần giá tín hiệu nhất có thể, và thà
-# KHÔNG khớp còn hơn đuổi theo giá đã chạy quá xa trong lúc đột biến.
-MAX_ENTRY_SLIPPAGE_PCT = 0.0015   # 0.15%
-
 MAX_CONCURRENT_POSITIONS = 5      # Số lệnh mở đồng thời tối đa (toàn bộ executor, không phải mỗi symbol)
 DAILY_LOSS_LIMIT_PCT     = 0.5   # Lỗ ròng trong ngày >= 50% vốn lúc đầu ngày -> tự tắt auto-trade
 
@@ -171,9 +166,13 @@ class TradeExecutor:
             self._cached_balance = await self._fetch_balance()
         return self._cached_balance
 
-    async def _ensure_leverage(self, symbol: str) -> None:
+    async def _ensure_leverage(self, symbol: str) -> bool:
+        """Trả về False nếu KHÔNG đặt được đòn bẩy — nghĩa là symbol này không thực sự
+        giao dịch được trên Demo Trading (đã gặp thực tế: có symbol nằm trong exchangeInfo
+        nhưng API đòn bẩy/đặt lệnh vẫn báo "Invalid symbol"). open_position() phải dừng
+        ngay khi gặp False, không nên tiếp tục đặt lệnh chắc chắn sẽ lỗi theo."""
         if symbol in self._leverage_set:
-            return
+            return True
         try:
             await self.client.futures_change_margin_type(symbol=symbol, marginType=MARGIN_TYPE)
         except BinanceAPIException as e:
@@ -182,8 +181,11 @@ class TradeExecutor:
         try:
             await self.client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
         except BinanceAPIException as e:
-            logger.error(f"[Executor] Đặt đòn bẩy {symbol} lỗi: {e}")
+            logger.error(f"[Executor] {symbol}: không giao dịch được trên Demo Trading "
+                         f"(đặt đòn bẩy lỗi: {e}) — bỏ qua tín hiệu này")
+            return False
         self._leverage_set.add(symbol)
+        return True
 
     def _reset_daily_if_needed(self) -> None:
         today = date.today()
@@ -300,7 +302,14 @@ class TradeExecutor:
             risk_amount = balance * RISK_PCT_PER_TRADE
             raw_qty     = risk_amount / sl_distance
 
-            filters = await self._get_filters(symbol)
+            try:
+                filters = await self._get_filters(symbol)
+            except ValueError:
+                # Symbol không có trên Demo Trading (vd: sản phẩm TradFi-Perps như cổ
+                # phiếu token hoá, hoặc mainnet có nhưng demo chưa niêm yết) -> bỏ qua
+                # gọn gàng, không phải lỗi hệ thống.
+                logger.info(f"[Executor] {symbol}: không có trên Demo Trading, bỏ qua tín hiệu này")
+                return
             qty = _round_step(raw_qty, filters.step_size)
             if qty < float(filters.min_qty) or qty <= 0:
                 logger.info(f"[Executor] {symbol}: vốn quá nhỏ để mở lệnh đạt minQty ({filters.min_qty}), bỏ qua")
@@ -314,43 +323,52 @@ class TradeExecutor:
                 logger.info(f"[Executor] {symbol}: không đủ margin khả dụng ({balance:.2f} USDT), bỏ qua")
                 return
 
-            await self._ensure_leverage(symbol)
+            if not await self._ensure_leverage(symbol):
+                return
 
             side          = "BUY" if direction == "LONG" else "SELL"
             opposite_side = "SELL" if direction == "LONG" else "BUY"
 
-            # LIMIT + IOC thay vì MARKET: giới hạn mức trượt giá tối đa cho phép
-            # (MAX_ENTRY_SLIPPAGE_PCT) — nếu giá đã chạy quá xa so với lúc phát tín hiệu,
-            # lệnh sẽ KHÔNG khớp thay vì đuổi mua/bán bằng mọi giá.
-            limit_price = (entry_price * (1 + MAX_ENTRY_SLIPPAGE_PCT) if direction == "LONG"
-                           else entry_price * (1 - MAX_ENTRY_SLIPPAGE_PCT))
-            limit_price = _round_step(limit_price, filters.tick_size)
-
-            # QUAN TRỌNG: KHÔNG dùng phản hồi của futures_create_order (executedQty) hay
-            # truy vấn lại qua futures_get_order để xác nhận khớp — đã xác nhận thực tế
-            # trên Demo Trading là CẢ HAI đều có thể sai lệch (báo 0/"không tồn tại" dù
-            # lệnh đã khớp thật, do độ trễ đồng bộ dữ liệu giữa các endpoint). Xác nhận
-            # duy nhất đáng tin cậy là so sánh TRẠNG THÁI VỊ THẾ THẬT trước/sau khi đặt.
+            # MARKET — vào lệnh NGAY LẬP TỨC, ưu tiên chắc chắn khớp hơn kén giá (kèo
+            # đột biến cần tốc độ, đợi giá đẹp dễ lỡ mất sóng). QUAN TRỌNG: KHÔNG dùng
+            # phản hồi của futures_create_order (executedQty/avgPrice) để xác nhận khớp —
+            # đã xác nhận thực tế trên Demo Trading là phản hồi có thể sai lệch (báo 0 dù
+            # đã khớp thật, do độ trễ đồng bộ dữ liệu giữa các endpoint). Xác nhận duy
+            # nhất đáng tin cậy là so sánh TRẠNG THÁI VỊ THẾ THẬT trước/sau khi đặt.
             pos_amt_before, _ = await self._get_position(symbol)
 
-            await self.client.futures_create_order(
-                symbol=symbol, side=side, type="LIMIT", timeInForce="IOC",
-                price=limit_price, quantity=qty,
+            entry_order = await self.client.futures_create_order(
+                symbol=symbol, side=side, type="MARKET", quantity=qty,
             )
 
             await asyncio.sleep(0.8)
             pos_amt_after, pos_entry_price = await self._get_position(symbol)
             filled_qty = round(abs(pos_amt_after - pos_amt_before), 8)
             if filled_qty <= 0:
-                # Không khớp -> bỏ qua kèo âm thầm, không báo Telegram (chỉ log nội bộ)
-                logger.info(f"[Executor] {symbol}: lệnh IOC không khớp — giá đã trượt quá "
-                            f"{MAX_ENTRY_SLIPPAGE_PCT*100:.2f}% so với giá tín hiệu, bỏ qua")
+                # Thử lại 1 lần nữa sau khi chờ lâu hơn — phòng trường hợp endpoint vị
+                # thế chậm đồng bộ (đã gặp nhiều lần trên Demo Trading) trước khi kết
+                # luận thật sự không khớp (vd hết thanh khoản demo cho symbol này).
+                await asyncio.sleep(1.5)
+                pos_amt_after, pos_entry_price = await self._get_position(symbol)
+                filled_qty = round(abs(pos_amt_after - pos_amt_before), 8)
+
+            if filled_qty <= 0:
+                # Ghi kèm phản hồi gốc của lệnh (dù không tin làm nguồn xác nhận chính)
+                # để biết được lý do thật: status=EXPIRED/REJECTED -> thật sự không khớp
+                # (thường do thiếu thanh khoản demo cho symbol ít phổ biến); còn nếu
+                # status=FILLED thì lại là do endpoint vị thế trễ đồng bộ, không phải
+                # không khớp thật.
+                logger.warning(
+                    f"[Executor] {symbol}: lệnh MARKET không khớp (bất thường) — bỏ qua. "
+                    f"Phản hồi lệnh: status={entry_order.get('status')} "
+                    f"executedQty={entry_order.get('executedQty')} orderId={entry_order.get('orderId')}"
+                )
                 return
 
             # Giá vào lệnh THỰC TẾ = entryPrice thật của vị thế sau khi khớp (không phải
-            # giá lúc phát tín hiệu) — do lệnh đã bị giới hạn trượt giá ở trên, mức lệch
-            # này giờ chỉ còn trong khoảng ±MAX_ENTRY_SLIPPAGE_PCT.
-            actual_entry = pos_entry_price or limit_price
+            # giá lúc phát tín hiệu) — lệnh MARKET nên có thể lệch (trượt giá) so với
+            # giá tín hiệu, hiển thị rõ % lệch bên dưới để theo dõi.
+            actual_entry = pos_entry_price or entry_price
             slippage_pct = (actual_entry - entry_price) / entry_price * 100
             partial_note = "" if filled_qty >= qty * 0.999 else f" (khớp một phần {filled_qty}/{qty})"
             logger.info(f"[Executor] {symbol} {direction} MỞ LỆNH qty={filled_qty}{partial_note} "
@@ -391,7 +409,14 @@ class TradeExecutor:
                 f"TP={tp_rounded} SL={sl_rounded}"
             )
         except BinanceAPIException as e:
-            logger.error(f"[Executor] {symbol}: Binance API lỗi khi mở lệnh: {e}")
+            if e.code == -4411:
+                # "Please sign TradFi-Perps agreement" — sản phẩm cổ phiếu token hoá
+                # (vd PLTR, BABA) cần bên người dùng tự ký thoả thuận riêng trên giao
+                # diện Binance trước, không thể xử lý qua API -> chỉ log rõ, bỏ qua.
+                logger.warning(f"[Executor] {symbol}: cần ký thoả thuận TradFi-Perps trên "
+                               f"Binance (Demo Trading) trước khi bot có thể giao dịch symbol này, bỏ qua")
+            else:
+                logger.error(f"[Executor] {symbol}: Binance API lỗi khi mở lệnh: {e}")
         except Exception as e:
             logger.error(f"[Executor] {symbol}: lỗi không xác định khi mở lệnh: {e}", exc_info=True)
 
