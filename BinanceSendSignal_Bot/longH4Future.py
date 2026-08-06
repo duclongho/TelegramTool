@@ -21,13 +21,6 @@ except ImportError:
     ENABLE_AUTO_TRADE = False
     TradeExecutor = None
 
-# TODO(demo-test): TẠM BẬT — kênh Spike hiển thị NHƯ BÌNH THƯỜNG (báo tín hiệu + TP/SL
-# theo nến, bất kể có executor hay không); executor vẫn chạy ngầm đặt lệnh demo thật
-# nhưng CHỈ GHI LOG, không gửi Telegram. Sau khi test xong, đổi lại thành False để trả
-# về hành vi: có executor thì CHỈ báo theo lệnh thật (xem chỗ dùng biến này trong
-# SpikeScanner.on_live_tick/_check_position và _main()).
-EXECUTOR_SILENT_DURING_TEST = True
-
 # ═══════════════════════════════════════════════
 #  CẤU HÌNH — chỉnh ở đây
 # ═══════════════════════════════════════════════
@@ -138,11 +131,29 @@ class Position:
     tp:        float
     sl:        float
     opened_at: datetime
+    entry_bar_open: int | None = None   # bar_open của nến lúc tín hiệu phát ra (chỉ Spike dùng) —
+                                          # để tránh tính TP/SL lùi về biên độ đã có TRƯỚC lúc vào lệnh
 
 
 def _position_hit(pos: Position, candle: dict) -> Literal["TP", "SL"] | None:
-    """Kiểm tra 1 nến (đã đóng hoặc đang hình thành) có chạm TP/SL của lệnh đang mở không."""
-    if pos.direction == "SHORT":
+    """Kiểm tra 1 nến (đã đóng hoặc đang hình thành) có chạm TP/SL của lệnh đang mở không.
+
+    Nếu candle CHÍNH LÀ nến lúc tín hiệu vừa phát ra (entry_bar_open trùng bar_open của
+    nến) thì dùng giá ĐÓNG CỬA hiện tại thay vì cao/thấp của cả nến — vì nến đột biến vốn
+    đã có biên độ lớn TRƯỚC khi đủ điều kiện báo tín hiệu, dùng high/low cả nến sẽ tính
+    lùi luôn phần biến động đã xảy ra trước lúc vào lệnh (khiến TP/SL báo "chạm" gần như
+    ngay lập tức dù chưa có biến động mới nào sau khi vào lệnh)."""
+    is_entry_bar = pos.entry_bar_open is not None and candle.get("bar_open") == pos.entry_bar_open
+
+    if is_entry_bar:
+        price = candle["close"]
+        if pos.direction == "SHORT":
+            hit_tp = price <= pos.tp
+            hit_sl = price >= pos.sl
+        else:
+            hit_tp = price >= pos.tp
+            hit_sl = price <= pos.sl
+    elif pos.direction == "SHORT":
         hit_tp = candle["low"]  <= pos.tp
         hit_sl = candle["high"] >= pos.sl
     else:
@@ -696,7 +707,7 @@ class SpikeScanner:
         self.chat_id   = chat_id
         self.tp_pct    = tp_pct
         self.sl_pct    = sl_pct
-        self.executor  = executor   # TradeExecutor | None — nếu có, tự đặt lệnh demo/testnet khi có tín hiệu
+        self.executor  = executor   # TradeExecutor | None — nếu có, tự đặt lệnh thật khi có tín hiệu
         self._last_alert: dict[str, datetime] = {}
         self._last_signal_bar: dict[str, int] = {}   # symbol -> bar_open đã gửi tín hiệu
         self._positions: dict[str, Position] = {}
@@ -718,10 +729,9 @@ class SpikeScanner:
 
         logger.info(f"[SPIKE] {symbol} {pos.direction} {hit} | "
                     f"Entry={pos.entry:.4f}  {hit}={(pos.tp if hit == 'TP' else pos.sl):.4f}")
-        if self.executor is None or EXECUTOR_SILENT_DURING_TEST:
-            # Bình thường có executor thì lệnh thật đã khớp sẽ tự báo (giá/PnL chính
-            # xác hơn ước lượng theo nến này) -> khỏi báo trùng ở đây.
-            # (Trong lúc EXECUTOR_SILENT_DURING_TEST=True thì vẫn báo như cũ — xem TODO đầu file.)
+        if self.executor is None:
+            # Có executor -> lệnh thật đã khớp sẽ tự báo (giá/PnL chính xác hơn ước
+            # lượng theo nến này) -> khỏi báo trùng ở đây.
             await send_close_alert(pos, self.chat_id, INTERVAL_H1_DISPLAY, hit)
         del self._positions[symbol]
 
@@ -764,20 +774,20 @@ class SpikeScanner:
         self._positions[symbol] = Position(
             symbol=symbol, direction=signal.direction, entry=signal.price,
             tp=tp, sl=signal.sl, opened_at=datetime.now(),
+            entry_bar_open=bar_open,
         )
 
         logger.info(f">>> [SPIKE] TÍN HIỆU: {symbol} {signal.direction} (đột biến) | "
                     f"Entry={signal.price} | TP={tp} | SL={signal.sl}")
 
-        if self.executor is None or EXECUTOR_SILENT_DURING_TEST:
-            # Bình thường có executor thì khỏi báo tín hiệu "dự đoán" song song ở đây —
-            # executor tự báo bằng giá khớp THẬT sau khi đặt lệnh (tránh trùng/nhiễu).
-            # (Trong lúc EXECUTOR_SILENT_DURING_TEST=True thì vẫn báo như cũ — xem TODO đầu file.)
+        if self.executor is None:
+            # Có executor -> khỏi báo tín hiệu "dự đoán" song song ở đây — executor tự
+            # báo bằng giá khớp THẬT sau khi đặt lệnh (tránh trùng/nhiễu).
             await send_signal(signal, self.chat_id, INTERVAL_H1_DISPLAY, tp, _build_spike_message)
 
         if self.executor is not None:
             # Ưu tiên: đặt lệnh lên Binance TRƯỚC, executor tự lấy giá khớp THẬT rồi
-            # mới báo (notify trong executor.py — hiện chỉ log do EXECUTOR_SILENT_DURING_TEST).
+            # mới báo (notify trong executor.py).
             asyncio.create_task(self.executor.open_position(
                 symbol=symbol, direction=signal.direction,
                 entry_price=signal.price, sl_price=signal.sl, tp_price=tp,
@@ -890,18 +900,10 @@ async def _main() -> None:
         )
         executor = None
         if ENABLE_AUTO_TRADE and TradeExecutor is not None:
-            # notify_always: LUÔN gửi Telegram thật, kể cả lúc EXECUTOR_SILENT_DURING_TEST
-            # đang bật — dùng cho cảnh báo cần thấy ngay (vd: symbol không giao dịch được
-            # trên Demo Trading), khác với notify (báo kết quả lệnh, tôn trọng cờ silent).
+            notify        = lambda text: _send_telegram_message(TELEGRAM_CHAT_ID_SPIKE, text, "EXECUTOR")
             notify_always = lambda text: _send_telegram_message(TELEGRAM_CHAT_ID_SPIKE, text, "EXECUTOR-INFO")
-            if EXECUTOR_SILENT_DURING_TEST:
-                # TODO(demo-test): chỉ ghi log, không gửi Telegram — xem TODO đầu file.
-                async def notify(text: str) -> None:
-                    logger.info(f"[Executor-DEMO] {text}")
-            else:
-                notify = lambda text: _send_telegram_message(TELEGRAM_CHAT_ID_SPIKE, text, "EXECUTOR")
             executor = await TradeExecutor.create(notify, notify_always)
-            logger.warning("[Executor] AUTO-TRADE ĐANG BẬT — bot sẽ tự đặt lệnh (xem executor.py để kiểm tra testnet/thật)")
+            logger.warning("[Executor] AUTO-TRADE ĐANG BẬT (TÀI KHOẢN THẬT) — bot sẽ tự đặt lệnh tiền thật")
             await executor.reconcile_on_startup(set(symbols))
 
         spike_scanner = SpikeScanner(
