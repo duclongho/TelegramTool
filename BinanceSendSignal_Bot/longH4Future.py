@@ -572,20 +572,44 @@ def _build_close_message(pos: Position, interval_display: str, hit: Literal["TP"
     )
 
 
+TELEGRAM_SEND_RETRIES     = 3     # Tổng số lần thử gửi 1 tin (1 lần đầu + 2 lần retry)
+TELEGRAM_SEND_RETRY_DELAY = 2.0   # Giây chờ giữa mỗi lần retry
+
+
 async def _send_telegram_message(chat_id: str, text: str, tag: str) -> None:
+    """Gửi 1 tin Telegram, TỰ RETRY vài lần nếu lỗi mạng/API tạm thời — trước đây gửi lỗi là
+    mất tin VĨNH VIỄN (chỉ log, không ai biết), từng gây hiện tượng "có tin đóng lệnh (TP/SL)
+    nhưng KHÔNG có tin mở lệnh" dù lệnh thật vẫn mở/đóng đúng trên sàn (vd BSBUSDT: tin "Đã mở
+    LONG" gửi thất bại 1 lần thoáng qua, còn tin "Đóng ... TP" sau đó gửi lại thành công bình
+    thường nên vẫn thấy). KHÔNG retry nếu lỗi rõ ràng do payload sai (4xx do Markdown lỗi cú
+    pháp...) vì gửi lại y nguyên cũng sẽ lỗi y như vậy — chỉ retry lỗi mạng/timeout/5xx/429."""
     url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-    try:
-        connector = aiohttp.TCPConnector(ssl=False)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    logger.info(f"[TG-{tag}] Gửi thành công")
-                else:
+    last_error = ""
+    for attempt in range(1, TELEGRAM_SEND_RETRIES + 1):
+        try:
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        logger.info(f"[TG-{tag}] Gửi thành công" + (f" (lần {attempt})" if attempt > 1 else ""))
+                        return
                     body = await resp.text()
-                    logger.error(f"[TG-{tag}] Lỗi {resp.status}: {body}")
-    except Exception as e:
-        logger.error(f"[TG-{tag}] Không gửi được: {e}")
+                    last_error = f"HTTP {resp.status}: {body}"
+                    if 400 <= resp.status < 500 and resp.status != 429:
+                        # Lỗi phía payload (vd Markdown sai cú pháp, chat_id không hợp lệ) —
+                        # gửi lại y nguyên chắc chắn lỗi lại, dừng ngay, khỏi retry vô ích.
+                        logger.error(f"[TG-{tag}] Lỗi {last_error} — không retry (lỗi payload)")
+                        return
+                    logger.warning(f"[TG-{tag}] Lỗi {last_error} (lần {attempt}/{TELEGRAM_SEND_RETRIES})")
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"[TG-{tag}] Không gửi được: {e} (lần {attempt}/{TELEGRAM_SEND_RETRIES})")
+
+        if attempt < TELEGRAM_SEND_RETRIES:
+            await asyncio.sleep(TELEGRAM_SEND_RETRY_DELAY)
+
+    logger.error(f"[TG-{tag}] Gửi THẤT BẠI sau {TELEGRAM_SEND_RETRIES} lần: {last_error}")
 
 
 async def send_signal(signal: Signal, chat_id: str, interval_display: str, tp: float,

@@ -430,6 +430,21 @@ class TradeExecutor:
                     f"Phản hồi lệnh: status={entry_order.get('status')} "
                     f"executedQty={entry_order.get('executedQty')} orderId={entry_order.get('orderId')}"
                 )
+                # QUAN TRỌNG: báo NGAY ra Telegram, đừng chỉ log — nếu thật ra ĐÃ khớp (endpoint
+                # vị thế chỉ trễ đồng bộ hơn 2.3s chờ ở trên, không phải không khớp thật) thì vị
+                # thế đó sẽ hở, KHÔNG có SL/TP (code dừng ở đây, chưa kịp đặt) cho tới khi vòng
+                # quét mồ côi (~60s/lần) tự vá lại — nên phải cảnh báo ngay để biết mà kiểm tra
+                # tay, không lặng im chờ (đây chính là kiểu lỗi từng gây ra hiện tượng "có tin
+                # đóng lệnh TP/SL nhưng không thấy tin mở lệnh" — nếu do bug này, tin đóng lệnh
+                # đến từ vòng quét mồ côi sau đó, KHÔNG phải từ open_position()).
+                await self.notify_always(
+                    chat_id,
+                    f"⚠️ 🔴 {symbol}: đặt lệnh MARKET {direction} xong nhưng KHÔNG xác nhận được "
+                    f"đã khớp sau {0.8 + 1.5:.1f}s (status={entry_order.get('status')}, "
+                    f"executedQty={entry_order.get('executedQty')}) — nếu thực ra ĐÃ khớp trên "
+                    f"sàn, vị thế đang KHÔNG có SL/TP, vòng quét mồ côi sẽ tự vá trong ~60s. "
+                    f"Kiểm tra tay trên Binance nếu cần."
+                )
                 return
 
             # Giá vào lệnh THỰC TẾ = entryPrice thật của vị thế sau khi khớp (không phải
