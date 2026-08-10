@@ -25,9 +25,17 @@ except ImportError:
 #  CẤU HÌNH — chỉnh ở đây
 # ═══════════════════════════════════════════════
 TELEGRAM_TOKEN         = "8641278115:AAEB08VXrX5YJl_2zzM_SFF4JRdEwIfAj-s"   # Token bot Telegram
-TELEGRAM_CHAT_ID       = "-1004448248877"   # Chat ID nhận LONG SIGNAL (H1) + SHORT SIGNAL (H1) — điều kiện mới, chạm BB
-TELEGRAM_CHAT_ID_H1    = "-1004340326145"   # Chat ID nhận tín hiệu LONG/SHORT (H1) cũ — đóng cửa vượt BB dưới/trên, TP/SL cũ
-TELEGRAM_CHAT_ID_SPIKE = "-1003980035281"   # : Chat ID nhận LONG/SHORT SIGNAL ĐỘT BIẾN (real-time)
+TELEGRAM_CHAT_ID       = "-1004448248877"   # Chat ID nhận kèo BB H1 Rút Râu (LONG SIGNAL (H1) + SHORT SIGNAL (H1))
+TELEGRAM_CHAT_ID_H1    = "-1004340326145"   # Chat ID nhận kèo BB H1 Đóng Vượt Biên (LONG/SHORT SIGNAL H1)
+TELEGRAM_CHAT_ID_SPIKE = "-1003980035281"   # Chat ID nhận kèo BB H1 Đột Biến (LONG/SHORT SIGNAL, real-time)
+TELEGRAM_CHAT_ID_MIDCROSS = "-1004462460673"   # Chat ID nhận kèo BB RSI H1 (BB biên giữa + RSI6)
+
+# Tên gọi CHÍNH THỨC của 4 kèo — dùng thống nhất trong tin nhắn Telegram + thống kê cuối ngày,
+# thay cho các tên mô tả rời rạc trước đây (chạm BB / vượt biên / đột biến / BB giữa+RSI6).
+KEO_RUTRAU_NAME   = "BB H1 Rút Râu"          # <-> TELEGRAM_CHAT_ID       (nến rút râu chạm BB trên/dưới)
+KEO_LEGACY_NAME   = "BB H1 Đóng Vượt Biên"   # <-> TELEGRAM_CHAT_ID_H1    (đóng cửa vượt BB trên/dưới, momentum)
+KEO_SPIKE_NAME    = "BB H1 Đột Biến"         # <-> TELEGRAM_CHAT_ID_SPIKE (nến biến động đột biến, real-time)
+KEO_MIDCROSS_NAME = "BB RSI H1"              # <-> TELEGRAM_CHAT_ID_MIDCROSS (BB biên giữa + RSI6)
 
 AUTO_TOP_SYMBOLS  = True   # True = tự động lấy top coin theo khối lượng
 TOP_SYMBOLS_COUNT = 200     # Số lượng coin theo dõi (LONG-H1 + SHORT-H1 mới)
@@ -50,7 +58,7 @@ DOJI_BODY_MAX_RATIO       = 0.3   # Thân nến tối đa 30% tổng biên độ
 DOJI_SHORT_WICK_MAX_RATIO = 0.1   # Râu phía đối diện hướng đảo chiều tối đa 10% tổng biên độ (gần như không có)
 BAND_CROSS_MIN_RATIO      = 0.1   # Phần xuyên qua BB trên/dưới tối thiểu 10% tổng biên độ nến
 
-LEGACY_BAND_CROSS_MIN_RATIO = 0.9   # Kèo cũ (vượt biên): phần nến nằm ngoài BB tối thiểu 90% biên độ nến (high-low)
+LEGACY_BAND_CROSS_MIN_RATIO = 0.7   # Kèo cũ (vượt biên): phần nến nằm ngoài BB tối thiểu 70% biên độ nến (high-low)
 
 SPIKE_LOOKBACK   = 10   # Số nến gần nhất dùng để tính biên độ/volume trung bình
 SPIKE_RANGE_MULT = 7    # Biên độ nến đột biến tối thiểu gấp 7 lần trung bình
@@ -61,14 +69,36 @@ MIN_CANDLES_FOR_SIGNAL = BB_PERIOD + 5  # Số nến tối thiểu cần có tr�
 ALERT_COOLDOWN_MINUTES        = 30    # Cooldown giữa 2 tín hiệu cùng coin/chiều
 LEGACY_ALERT_COOLDOWN_MINUTES = 8 * 60  # Cooldown riêng cho kèo cũ (vượt biên): 8 tiếng, tránh báo liên tục
 
-DOJI_TP_PCT = 0.02     # Chốt lời cố định 2% (kèo Long/Short H1 mới — nến rút râu chạm BB)
-DOJI_SL_PCT = 0.015    # Cắt lỗ cố định 1.5% (kèo Long/Short H1 mới)
+DOJI_TP_PCT = 0.02     # Chốt lời cố định 2% (kèo BB H1 Rút Râu)
+DOJI_SL_PCT = 0.015    # Cắt lỗ cố định 1.5% (kèo BB H1 Rút Râu)
 
-SPIKE_TP_PCT = 0.025   # Chốt lời cố định 2.5% (kèo Long/Short đột biến — real-time)
-SPIKE_SL_PCT = 0.02    # Cắt lỗ cố định 2% (kèo Long/Short đột biến)
+SPIKE_TP_PCT = 0.025   # Chốt lời cố định 2.5% (kèo BB H1 Đột Biến)
+SPIKE_SL_PCT = 0.02    # Cắt lỗ cố định 2% (kèo BB H1 Đột Biến)
 
-LEGACY_TP_PCT = 0.025  # Chốt lời cố định 2.5% (kèo Short H1 cũ)
-LEGACY_SL_PCT = 0.02   # Cắt lỗ cố định 2% (kèo Short H1 cũ)
+LEGACY_TP_PCT = 0.01    # Chốt lời cố định 1% (kèo BB H1 Đóng Vượt Biên)
+LEGACY_SL_PCT = 0.01    # Cắt lỗ cố định 1% (kèo BB H1 Đóng Vượt Biên)
+
+# Kèo BB RSI H1 — BB biên giữa + RSI6: giá đi từ vùng dưới/trên (không cần chạm BB trên/dưới,
+# chỉ cần đang ở về phía đó) xuyên qua BB GIỮA, xác nhận
+# bằng RSI(6) cắt ngưỡng 55/45 + volume nến xuyên biên >= 1.5x nến trước. TP theo % giá cố định;
+# SL THẬT theo RSI cắt NGƯỢC lại ngưỡng dừng (bot tự canh + đóng bằng MARKET, không phải mốc
+# giá cố định) — CÓ tự đặt lệnh thật (dùng chung executor với kèo Đột Biến), kèm 1 lệnh
+# STOP_MARKET giá cố định (MIDCROSS_SAFETY_SL_PCT) làm LƯỚI AN TOÀN dự phòng vì Binance không
+# hỗ trợ đặt lệnh dừng theo RSI (đề phòng bot rớt mạng/crash không kịp đóng theo RSI).
+MIDCROSS_RSI_PERIOD          = 6      # Chu kỳ RSI
+MIDCROSS_RSI_LONG_ENTRY      = 55     # RSI cắt LÊN qua mốc này -> xác nhận LONG
+MIDCROSS_RSI_SHORT_ENTRY     = 45     # RSI cắt XUỐNG qua mốc này -> xác nhận SHORT
+MIDCROSS_RSI_LONG_STOP       = 45     # Đang LONG, RSI tụt xuống DƯỚI mốc này -> cắt lỗ (SL)
+MIDCROSS_RSI_SHORT_STOP      = 55     # Đang SHORT, RSI vượt LÊN TRÊN mốc này -> cắt lỗ (SL)
+MIDCROSS_TP_PCT              = 0.02   # Chốt lời cố định 2%
+MIDCROSS_VOL_MULT            = 1.5    # Volume nến xuyên biên giữa phải >= 1.5 lần nến sát trước
+MIDCROSS_RISK_USD            = 2.0    # Rủi ro CỐ ĐỊNH mỗi lệnh (USDT) — riêng cho kèo này (khác Spike)
+MIDCROSS_SAFETY_SL_PCT       = 0.04   # SL giá CỐ ĐỊNH đặt thật trên sàn làm lưới an toàn dự phòng —
+                                       # không phải cơ chế thoát chính (đó là RSI), chỉ chặn rủi ro
+                                       # cực đoan nếu bot mất kết nối/crash không kịp đóng theo RSI
+MIDCROSS_ZONE_LOOKBACK = 3             # Số nến gần nhất TRƯỚC nến xuyên biên giữa — cả 3 nến này phải
+                                        # nằm hẳn về 1 phía của BB giữa (vùng dưới hoặc vùng trên), KHÔNG
+                                        # cần chạm tới BB trên/dưới, chỉ cần "đi từ vùng đó lên/xuống"
 
 WS_MAX_STREAMS_PER_CONN = 190   # Giới hạn an toàn số stream / 1 kết nối WebSocket (Binance giới hạn ~200)
 WS_RECONNECT_DELAY_SEC  = 5     # Chờ trước khi kết nối lại sau khi WebSocket bị rớt
@@ -110,6 +140,34 @@ def compute_indicators(candles: list[dict]) -> Indicators:
     return Indicators(bb_upper=bb_upper, bb_middle=bb_middle, bb_lower=bb_lower)
 
 
+def _calc_rsi(closes: list[float], period: int) -> list[float]:
+    """RSI kiểu Wilder (smoothing), trả về 1 list RSI cùng độ dài với closes (các vị trí chưa đủ
+    dữ liệu = 50.0 — trung tính). Dùng để lấy 2 giá trị gần nhất (trước/hiện tại) phát hiện CẮT
+    NGƯỠNG, giống cách BB dùng cho phát hiện xuyên biên."""
+    n = len(closes)
+    if n < period + 1:
+        return [50.0] * n
+
+    rsis = [50.0] * n
+    gains = losses = 0.0
+    for i in range(1, period + 1):
+        diff = closes[i] - closes[i - 1]
+        gains += max(diff, 0.0)
+        losses += max(-diff, 0.0)
+    avg_gain = gains / period
+    avg_loss = losses / period
+    rsis[period] = 100.0 if avg_loss == 0 else 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+
+    for i in range(period + 1, n):
+        diff = closes[i] - closes[i - 1]
+        gain = max(diff, 0.0)
+        loss = max(-diff, 0.0)
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+        rsis[i] = 100.0 if avg_loss == 0 else 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+    return rsis
+
+
 # ═══════════════════════════════════════════════
 #  SIGNAL
 # ═══════════════════════════════════════════════
@@ -133,6 +191,17 @@ class Position:
     opened_at: datetime
     entry_bar_open: int | None = None   # bar_open của nến lúc tín hiệu phát ra (chỉ Spike dùng) —
                                           # để tránh tính TP/SL lùi về biên độ đã có TRƯỚC lúc vào lệnh
+
+
+@dataclass
+class MidCrossPosition:
+    """Lệnh đang mở của kèo BB biên giữa + RSI6 — KHÁC Position ở chỗ SL không phải mốc giá cố
+    định, mà là điều kiện RSI(6) cắt ngược qua MIDCROSS_RSI_LONG_STOP/SHORT_STOP (xem MidCrossScanner)."""
+    symbol:    str
+    direction: Literal["LONG", "SHORT"]
+    entry:     float
+    tp:        float
+    opened_at: datetime
 
 
 def _position_hit(pos: Position, candle: dict) -> Literal["TP", "SL"] | None:
@@ -168,6 +237,49 @@ def _position_hit(pos: Position, candle: dict) -> Literal["TP", "SL"] | None:
         bearish = candle["close"] <= candle["open"]
         return ("TP" if bearish else "SL") if pos.direction == "SHORT" else ("SL" if bearish else "TP")
     return "TP" if hit_tp else "SL"
+
+
+class DailyStats:
+    """Đếm tín hiệu/kết quả TRONG NGÀY cho 1 kèo — dùng CHUNG cho cả 2 Scanner chiều
+    Long/Short của cùng 1 kèo (vd long_scanner + short_scanner cùng ghi vào 1 DailyStats
+    "H1 mới"), vì đây là ước lượng theo nến (không phải PnL thật) nên chỉ đếm % thắng/thua,
+    không tính USDT — khác với Spike (dùng PnL thật từ executor)."""
+
+    def __init__(self, name: str, chat_id: str) -> None:
+        self.name    = name
+        self.chat_id = chat_id
+        self.total   = 0
+        self.wins    = 0
+        self.losses  = 0
+
+    def record_open(self) -> None:
+        self.total += 1
+
+    def record_result(self, hit: Literal["TP", "SL"]) -> None:
+        if hit == "TP":
+            self.wins += 1
+        else:
+            self.losses += 1
+
+    def reset(self) -> None:
+        self.total = 0
+        self.wins = 0
+        self.losses = 0
+
+    def build_message(self, date_label: str) -> str:
+        closed     = self.wins + self.losses
+        win_rate   = f"{self.wins / closed * 100:.0f}%" if closed else "—"
+        still_open = self.total - closed
+        lines = [
+            f"📊 *TỔNG KẾT NGÀY — {date_label}*",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            f"📥 Tổng tín hiệu: *{self.total}*",
+            f"✅ Thắng (TP): *{self.wins}*  |  ❌ Thua (SL): *{self.losses}*",
+            f"📊 Tỉ lệ thắng: *{win_rate}*",
+        ]
+        if still_open > 0:
+            lines.append(f"⏳ Đang mở/chưa rõ kết quả: *{still_open}*")
+        return "\n".join(lines)
 
 
 def detect_signal(symbol: str, candles: list[dict],
@@ -222,9 +334,13 @@ def detect_signal(symbol: str, candles: list[dict],
 
 
 def detect_legacy_signal(symbol: str, candles: list[dict],
-                          direction: Literal["LONG", "SHORT"] = "SHORT") -> Signal | None:
-    """Kèo LONG/SHORT H1 cũ (vượt biên) — nến đóng cửa vượt qua BB trên/dưới, với phần nến
-    nằm ngoài band tối thiểu LEGACY_BAND_CROSS_MIN_RATIO (90%) tổng biên độ nến."""
+                          band: Literal["UPPER", "LOWER"] = "UPPER") -> Signal | None:
+    """Kèo H1 cũ (vượt biên) — nến đóng cửa vượt qua BB trên/dưới, với phần nến nằm ngoài
+    band tối thiểu LEGACY_BAND_CROSS_MIN_RATIO (70%) tổng biên độ nến.
+
+    Chiến lược MOMENTUM (mua/bán theo đà breakout, KHÔNG PHẢI đảo chiều như bản cũ):
+    vượt band TRÊN -> BUY (kỳ vọng đà tăng tiếp diễn); vượt band DƯỚI -> SELL (kỳ vọng
+    đà giảm tiếp diễn)."""
     if len(candles) < BB_PERIOD + 2:
         return None
 
@@ -239,20 +355,22 @@ def detect_legacy_signal(symbol: str, candles: list[dict],
     if ind["bb_middle"] == 0.0:
         return None
 
-    if direction == "LONG":
-        # Đóng cửa nằm dưới BB dưới -> báo LONG
-        if curr["close"] >= ind["bb_lower"]:
-            return None
-        outside = min(ind["bb_lower"], curr["high"]) - curr["low"]
-        if outside < LEGACY_BAND_CROSS_MIN_RATIO * rng:
-            return None
-    else:
-        # Đóng cửa nằm trên BB trên -> báo SHORT
+    if band == "UPPER":
+        # Đóng cửa nằm trên BB trên -> báo LONG (mua theo đà breakout)
         if curr["close"] <= ind["bb_upper"]:
             return None
         outside = curr["high"] - max(ind["bb_upper"], curr["low"])
         if outside < LEGACY_BAND_CROSS_MIN_RATIO * rng:
             return None
+        direction: Literal["LONG", "SHORT"] = "LONG"
+    else:
+        # Đóng cửa nằm dưới BB dưới -> báo SHORT (bán theo đà breakout)
+        if curr["close"] >= ind["bb_lower"]:
+            return None
+        outside = min(ind["bb_lower"], curr["high"]) - curr["low"]
+        if outside < LEGACY_BAND_CROSS_MIN_RATIO * rng:
+            return None
+        direction = "SHORT"
 
     logger.info(f"{symbol} {direction} (legacy) | Entry={curr['close']:.4f}")
     return Signal(symbol=symbol, direction=direction, price=curr["close"], sl=0.0, ind=ind)
@@ -292,6 +410,58 @@ def detect_spike_signal(symbol: str, closed_candles: list[dict], live_candle: di
                 f"Range={live_range:.4f} (TB={avg_range:.4f})  Vol={live_candle['volume']:.0f} (TB={avg_volume:.0f})")
     return Signal(symbol=symbol, direction=direction, price=live_candle["close"], sl=0.0, ind=ind)
 
+
+def detect_midcross_signal(symbol: str, candles: list[dict],
+                            direction: Literal["LONG", "SHORT"] = "LONG") -> Signal | None:
+    """Kèo MỚI — BB biên giữa + RSI6 (H1). 3 điều kiện trên nến VỪA đóng cửa (curr):
+    1) Giá "đi từ vùng dưới/trên" — cả MIDCROSS_ZONE_LOOKBACK nến gần nhất TRƯỚC curr đều đóng
+       cửa nằm hẳn 1 phía của BB GIỮA (vùng dưới hoặc vùng trên) — KHÔNG cần chạm tới BB
+       trên/dưới, chỉ cần đang ở về phía đó — rồi curr bật lên/xuống xuyên qua BB GIỮA.
+    2) RSI(6) cắt qua mốc 55 (LONG) / 45 (SHORT) đúng trên curr.
+    3) Volume curr >= MIDCROSS_VOL_MULT lần volume nến sát trước (prev)."""
+    needed = BB_PERIOD + MIDCROSS_ZONE_LOOKBACK + MIDCROSS_RSI_PERIOD + 2
+    if len(candles) < needed:
+        return None
+
+    curr = candles[-1]
+    prev = candles[-2]
+    if curr["volume"] < MIDCROSS_VOL_MULT * prev["volume"]:
+        return None   # Điều kiện 3: volume nến xuyên biên giữa
+
+    # BB tính đến TRƯỚC curr (tránh self-reference) — dùng để xét prev/lookback nằm ở vùng
+    # dưới hay trên BB giữa.
+    ind_prev = compute_indicators(candles[:-1])
+    if ind_prev["bb_middle"] == 0.0:
+        return None
+    # BB tính ĐẾN curr — dùng để xét chính curr đã xuyên qua biên giữa hay chưa.
+    ind_curr = compute_indicators(candles)
+    if ind_curr["bb_middle"] == 0.0:
+        return None
+
+    closes = [c["close"] for c in candles]
+    rsi_series = _calc_rsi(closes, MIDCROSS_RSI_PERIOD)
+    prev_rsi, curr_rsi = rsi_series[-2], rsi_series[-1]
+
+    lookback = candles[-1 - MIDCROSS_ZONE_LOOKBACK : -1]   # N nến trước curr (không gồm curr)
+
+    if direction == "LONG":
+        if not all(c["close"] <= ind_prev["bb_middle"] for c in lookback):
+            return None   # Điều kiện 1: chưa "đi từ vùng dưới" (còn nến nào vượt lên vùng trên)
+        if not (prev["close"] <= ind_prev["bb_middle"] and curr["close"] > ind_curr["bb_middle"]):
+            return None   # Điều kiện 2: chưa đâm xuyên biên giữa (từ dưới lên)
+        if not (prev_rsi < MIDCROSS_RSI_LONG_ENTRY <= curr_rsi):
+            return None   # Điều kiện 3 (RSI): chưa cắt LÊN qua 55
+    else:
+        if not all(c["close"] >= ind_prev["bb_middle"] for c in lookback):
+            return None   # Điều kiện 1: chưa "đi từ vùng trên" (còn nến nào tụt xuống vùng dưới)
+        if not (prev["close"] >= ind_prev["bb_middle"] and curr["close"] < ind_curr["bb_middle"]):
+            return None   # Điều kiện 2: chưa đâm xuyên biên giữa (từ trên xuống)
+        if not (prev_rsi > MIDCROSS_RSI_SHORT_ENTRY >= curr_rsi):
+            return None   # Điều kiện 3 (RSI): chưa cắt XUỐNG qua 45
+
+    logger.info(f"{symbol} {direction} (midcross) | Entry={curr['close']:.4f} RSI={curr_rsi:.1f}")
+    return Signal(symbol=symbol, direction=direction, price=curr["close"], sl=0.0, ind=ind_curr)
+
 # ═══════════════════════════════════════════════
 #  TELEGRAM
 # ═══════════════════════════════════════════════
@@ -309,7 +479,7 @@ def _build_message(signal: Signal, interval_display: str, tp: float) -> str:
     band       = "trên" if is_short else "dưới"
     candle_dir = "cây nến giảm" if is_short else "cây nến tăng"
     return (
-        f"*{emoji} {signal.direction} SIGNAL ({interval_display})*\n\n"
+        f"*{emoji} {signal.direction} SIGNAL - {interval_display}*\n\n"
         f"Coin: `{signal.symbol}`\n\n"
         f"Điều kiện:\n"
         f"✓ Nến rút râu xuyên qua BB {band}\n"
@@ -325,9 +495,9 @@ def _build_message(signal: Signal, interval_display: str, tp: float) -> str:
 def _build_legacy_message(signal: Signal, interval_display: str, tp: float) -> str:
     is_short = signal.direction == "SHORT"
     emoji    = "🔴" if is_short else "🟢"
-    band     = "trên" if is_short else "dưới"
+    band     = "dưới" if is_short else "trên"   # SHORT <- vượt band dưới, LONG <- vượt band trên (momentum)
     return (
-        f"*{emoji} {signal.direction} SIGNAL ({interval_display})*\n\n"
+        f"*{emoji} {signal.direction} SIGNAL - {interval_display}*\n\n"
         f"Coin: `{signal.symbol}`\n\n"
         f"Điều kiện:\n"
         f"✓ Nến đóng cửa vượt qua BB {band}\n"
@@ -343,7 +513,7 @@ def _build_spike_message(signal: Signal, interval_display: str, tp: float) -> st
     emoji    = "🔴🚨" if is_short else "🟢🚨"
     band     = "trên" if is_short else "dưới"
     return (
-        f"*{emoji} {signal.direction} SIGNAL - ĐỘT BIẾN ({interval_display})*\n\n"
+        f"*{emoji} {signal.direction} SIGNAL - {interval_display}*\n\n"
         f"Coin: `{signal.symbol}`\n\n"
         f"Điều kiện:\n"
         f"✓ Nến đột biến xuyên qua BB {band} (chưa đóng cửa)\n"
@@ -356,13 +526,47 @@ def _build_spike_message(signal: Signal, interval_display: str, tp: float) -> st
     )
 
 
+def _build_midcross_message(signal: Signal, tp: float, stop_rsi: float) -> str:
+    is_short = signal.direction == "SHORT"
+    emoji    = "🔴" if is_short else "🟢"
+    zone     = "trên" if is_short else "dưới"
+    entry_rsi = MIDCROSS_RSI_SHORT_ENTRY if is_short else MIDCROSS_RSI_LONG_ENTRY
+    return (
+        f"*{emoji} {signal.direction} SIGNAL - {KEO_MIDCROSS_NAME}*\n\n"
+        f"Coin: `{signal.symbol}`\n\n"
+        f"Điều kiện:\n"
+        f"✓ Giá đi từ vùng {zone} xuyên qua BB giữa\n"
+        f"✓ RSI(6) cắt qua mốc {entry_rsi}\n"
+        f"✓ Volume nến xuyên biên giữa ≥ {MIDCROSS_VOL_MULT}x nến trước\n\n"
+        f"Entry: `{_fmt(signal.price)}`\n"
+        f"TP: `{_fmt(tp)}` (+{MIDCROSS_TP_PCT*100:.1f}%)\n"
+        f"SL: theo RSI(6) cắt qua {stop_rsi:.0f}"
+    )
+
+
+def _build_midcross_close_message(pos: "MidCrossPosition", hit: Literal["TP", "SL"], curr_rsi: float) -> str:
+    icon  = "✅" if hit == "TP" else "🛑"
+    label = "Chốt lời (TP)" if hit == "TP" else "Cắt lỗ (SL — RSI đảo chiều)"
+    lines = [
+        f"*{icon} {label} — {pos.direction} {pos.symbol} - {KEO_MIDCROSS_NAME}*",
+        "",
+        f"Entry: `{_fmt(pos.entry)}`",
+    ]
+    if hit == "TP":
+        pct = abs(pos.tp - pos.entry) / pos.entry * 100
+        lines.append(f"TP: `{_fmt(pos.tp)}` (~{pct:.1f}%)")
+    else:
+        lines.append(f"RSI(6) hiện tại: `{curr_rsi:.1f}`")
+    return "\n".join(lines)
+
+
 def _build_close_message(pos: Position, interval_display: str, hit: Literal["TP", "SL"]) -> str:
     level  = pos.tp if hit == "TP" else pos.sl
     emoji  = "✅" if hit == "TP" else "🛑"
     pct    = abs(level - pos.entry) / pos.entry * 100
     label  = "Chốt lời (TP)" if hit == "TP" else "Cắt lỗ (SL)"
     return (
-        f"*{emoji} {label} — {pos.direction} {pos.symbol} ({interval_display})*\n\n"
+        f"*{emoji} {label} — {pos.direction} {pos.symbol} - {interval_display}*\n\n"
         f"Entry: `{_fmt(pos.entry)}`\n"
         f"{hit}: `{_fmt(level)}` (~{pct:.1f}%)"
     )
@@ -623,7 +827,8 @@ class Scanner:
                  chat_id: str, detect_fn: Callable[[str, list[dict]], Signal | None],
                  tp_pct: float, sl_pct: float,
                  message_builder: Callable[[Signal, str, float], str] = _build_message,
-                 cooldown_minutes: int = ALERT_COOLDOWN_MINUTES) -> None:
+                 cooldown_minutes: int = ALERT_COOLDOWN_MINUTES,
+                 daily_stats: "DailyStats | None" = None) -> None:
         self.symbols          = {s.upper() for s in symbols}
         self.interval_display = interval_display
         self.chat_id          = chat_id
@@ -632,6 +837,7 @@ class Scanner:
         self.sl_pct           = sl_pct
         self.message_builder  = message_builder
         self.cooldown_minutes = cooldown_minutes
+        self.daily_stats      = daily_stats   # DailyStats dùng CHUNG với scanner chiều đối diện cùng kèo
         self._last_alert: dict[str, datetime] = {}
         self._positions: dict[str, Position] = {}   # symbol -> lệnh đang mở
 
@@ -654,6 +860,8 @@ class Scanner:
 
         logger.info(f"[{self.interval_display}] {symbol} {pos.direction} {hit} | "
                     f"Entry={pos.entry:.4f}  {hit}={(pos.tp if hit == 'TP' else pos.sl):.4f}")
+        if self.daily_stats is not None:
+            self.daily_stats.record_result(hit)
         await send_close_alert(pos, self.chat_id, self.interval_display, hit)
         del self._positions[symbol]
 
@@ -690,6 +898,8 @@ class Scanner:
 
         logger.info(f">>> [{self.interval_display}] TÍN HIỆU: {symbol} {signal.direction} | "
                     f"Entry={signal.price} | TP={tp} | SL={signal.sl}")
+        if self.daily_stats is not None:
+            self.daily_stats.record_open()
         await send_signal(signal, self.chat_id, self.interval_display, tp, self.message_builder)
 
     async def on_live_tick(self, symbol: str, candles: list[dict], live_candle: dict) -> None:
@@ -732,7 +942,7 @@ class SpikeScanner:
         if self.executor is None:
             # Có executor -> lệnh thật đã khớp sẽ tự báo (giá/PnL chính xác hơn ước
             # lượng theo nến này) -> khỏi báo trùng ở đây.
-            await send_close_alert(pos, self.chat_id, INTERVAL_H1_DISPLAY, hit)
+            await send_close_alert(pos, self.chat_id, KEO_SPIKE_NAME, hit)
         del self._positions[symbol]
 
     async def on_closed_candle(self, symbol: str, candles: list[dict]) -> None:
@@ -783,7 +993,7 @@ class SpikeScanner:
         if self.executor is None:
             # Có executor -> khỏi báo tín hiệu "dự đoán" song song ở đây — executor tự
             # báo bằng giá khớp THẬT sau khi đặt lệnh (tránh trùng/nhiễu).
-            await send_signal(signal, self.chat_id, INTERVAL_H1_DISPLAY, tp, _build_spike_message)
+            await send_signal(signal, self.chat_id, KEO_SPIKE_NAME, tp, _build_spike_message)
 
         if self.executor is not None:
             # Ưu tiên: đặt lệnh lên Binance TRƯỚC, executor tự lấy giá khớp THẬT rồi
@@ -791,7 +1001,131 @@ class SpikeScanner:
             asyncio.create_task(self.executor.open_position(
                 symbol=symbol, direction=signal.direction,
                 entry_price=signal.price, sl_price=signal.sl, tp_price=tp,
-                sl_pct=self.sl_pct, tp_pct=self.tp_pct,
+                sl_pct=self.sl_pct, tp_pct=self.tp_pct, chat_id=self.chat_id,
+            ))
+
+
+class MidCrossScanner:
+    """Kèo BB RSI H1 — BB biên giữa + RSI6. CÓ tự đặt lệnh thật khi có executor (dùng chung
+    executor/tài khoản với kèo Đột Biến) — xem detect_midcross_signal() cho điều kiện vào lệnh.
+
+    TP: mốc giá cố định (+MIDCROSS_TP_PCT) — đặt thật bằng TAKE_PROFIT_MARKET trên sàn (executor
+    tự xử lý), kiểm tra qua high/low nến ở đây chỉ để ước lượng/đóng bookkeeping cục bộ.
+    SL THẬT: điều kiện RSI(6) cắt NGƯỢC qua MIDCROSS_RSI_LONG_STOP (45, khi đang LONG) /
+    MIDCROSS_RSI_SHORT_STOP (55, khi đang SHORT), tính lại trên MỖI nến vừa đóng — Binance
+    không đặt được lệnh dừng theo RSI nên khi phát hiện phải tự gọi executor.close_position_market()
+    đóng NGAY bằng MARKET. Ngoài ra executor còn đặt kèm 1 STOP_MARKET giá cố định
+    (MIDCROSS_SAFETY_SL_PCT) làm lưới an toàn dự phòng nếu bot rớt mạng/crash không kịp đóng.
+    Chỉ xét trên nến đã đóng (không xét live tick) vì RSI tính trên nến đang hình thành sẽ
+    nhấp nhô liên tục, không phù hợp để làm điều kiện cắt lỗ ổn định."""
+
+    def __init__(self, symbols: list[str], chat_id: str,
+                 daily_stats: "DailyStats | None" = None, executor=None) -> None:
+        self.symbols     = {s.upper() for s in symbols}
+        self.chat_id     = chat_id
+        self.daily_stats = daily_stats
+        self.executor    = executor   # TradeExecutor | None — nếu có, tự đặt lệnh thật khi có tín hiệu
+        self._last_alert: dict[str, datetime] = {}
+        self._positions: dict[str, MidCrossPosition] = {}
+
+    def _cooldown_left(self, symbol: str) -> int:
+        last = self._last_alert.get(symbol)
+        if last is None:
+            return 0
+        remaining = timedelta(minutes=ALERT_COOLDOWN_MINUTES) - (datetime.now() - last)
+        return max(0, int(remaining.total_seconds()))
+
+    async def _check_position(self, symbol: str, candles: list[dict]) -> None:
+        pos = self._positions.get(symbol)
+        if pos is None:
+            return
+        curr = candles[-1]
+
+        hit_tp = (curr["high"] >= pos.tp) if pos.direction == "LONG" else (curr["low"] <= pos.tp)
+
+        closes    = [c["close"] for c in candles]
+        curr_rsi  = _calc_rsi(closes, MIDCROSS_RSI_PERIOD)[-1]
+        hit_sl    = (curr_rsi < MIDCROSS_RSI_LONG_STOP) if pos.direction == "LONG" \
+            else (curr_rsi > MIDCROSS_RSI_SHORT_STOP)
+
+        if not (hit_tp or hit_sl):
+            return
+
+        if hit_tp and hit_sl:
+            # Cả 2 cùng chạm trên 1 nến — ước lượng theo hướng nến để chọn mốc chạm trước,
+            # giống cách _position_hit xử lý cho các kèo khác.
+            bearish = curr["close"] <= curr["open"]
+            hit: Literal["TP", "SL"] = ("SL" if bearish else "TP") if pos.direction == "LONG" \
+                else ("TP" if bearish else "SL")
+        else:
+            hit = "TP" if hit_tp else "SL"
+
+        logger.info(f"[MIDCROSS] {symbol} {pos.direction} {hit} | Entry={pos.entry:.4f} "
+                    f"{'TP=' + f'{pos.tp:.4f}' if hit == 'TP' else 'RSI=' + f'{curr_rsi:.1f}'}")
+        if self.daily_stats is not None:
+            self.daily_stats.record_result(hit)
+
+        if self.executor is None:
+            text = _build_midcross_close_message(pos, hit, curr_rsi)
+            await _send_telegram_message(self.chat_id, text, f"MIDCROSS-{hit}")
+        elif hit == "SL":
+            # TP đã có TAKE_PROFIT_MARKET thật trên sàn tự khớp (executor tự phát hiện qua WS/
+            # reconciliation) -> chỉ riêng SL theo RSI là executor không tự biết, phải chủ động
+            # gọi đóng bằng MARKET ngay (an toàn nếu lúc này không còn vị thế thật — tự bỏ qua).
+            asyncio.create_task(self.executor.close_position_market(symbol, reason="RSI"))
+
+        del self._positions[symbol]
+
+    async def on_closed_candle(self, symbol: str, candles: list[dict]) -> None:
+        if symbol not in self.symbols:
+            return
+
+        await self._check_position(symbol, candles)
+        if symbol in self._positions:
+            return   # Lệnh của coin này vẫn đang mở, chưa tìm tín hiệu mới
+
+        signal = (detect_midcross_signal(symbol, candles, direction="LONG")
+                  or detect_midcross_signal(symbol, candles, direction="SHORT"))
+        if signal is None:
+            return
+
+        left = self._cooldown_left(symbol)
+        if left > 0:
+            m, s = divmod(left, 60)
+            logger.info(f"[MIDCROSS] {symbol} {signal.direction}: cooldown còn {m}p{s:02d}s")
+            return
+        self._last_alert[symbol] = datetime.now()
+
+        if signal.direction == "LONG":
+            tp             = signal.price * (1 + MIDCROSS_TP_PCT)
+            stop_level     = MIDCROSS_RSI_LONG_STOP
+            safety_sl_price = signal.price * (1 - MIDCROSS_SAFETY_SL_PCT)
+        else:
+            tp             = signal.price * (1 - MIDCROSS_TP_PCT)
+            stop_level     = MIDCROSS_RSI_SHORT_STOP
+            safety_sl_price = signal.price * (1 + MIDCROSS_SAFETY_SL_PCT)
+
+        self._positions[symbol] = MidCrossPosition(
+            symbol=symbol, direction=signal.direction, entry=signal.price,
+            tp=tp, opened_at=datetime.now(),
+        )
+        if self.daily_stats is not None:
+            self.daily_stats.record_open()
+
+        logger.info(f">>> [MIDCROSS] TÍN HIỆU: {symbol} {signal.direction} | "
+                    f"Entry={signal.price} | TP={tp} | SL=RSI qua {stop_level}")
+
+        if self.executor is None:
+            text = _build_midcross_message(signal, tp, stop_level)
+            await _send_telegram_message(self.chat_id, text, f"MIDCROSS-{signal.direction}")
+        else:
+            # Ưu tiên: đặt lệnh lên Binance TRƯỚC, executor tự lấy giá khớp THẬT rồi mới báo
+            # (notify trong executor.py) — khỏi báo tín hiệu "dự đoán" song song ở đây.
+            asyncio.create_task(self.executor.open_position(
+                symbol=symbol, direction=signal.direction,
+                entry_price=signal.price, sl_price=safety_sl_price, tp_price=tp,
+                sl_pct=MIDCROSS_SAFETY_SL_PCT, tp_pct=MIDCROSS_TP_PCT,
+                chat_id=self.chat_id, risk_usd=MIDCROSS_RISK_USD,
             ))
 
 # ═══════════════════════════════════════════════
@@ -807,13 +1141,16 @@ def _banner() -> None:
         logger.info(f"  Symbol    : Thủ công {len(SYMBOLS)} cặp")
     logger.info(f"  Timeframe : {INTERVAL_H1_DISPLAY}  (chạy cho cả 6 kèo, 1 LiveFeed dùng chung)")
     logger.info(f"  Nguồn nến : Futures WebSocket (path /market)")
-    logger.info(f"  LONG/SHORT mới (chạm BB)   -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID else 'OK'}  "
+    logger.info(f"  {KEO_RUTRAU_NAME:<22} -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID else 'OK'}  "
                 f"TP/SL={DOJI_TP_PCT*100:.1f}%/{DOJI_SL_PCT*100:.1f}%")
-    logger.info(f"  LONG/SHORT đột biến (real-time) -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID_SPIKE else 'OK'}  "
+    logger.info(f"  {KEO_SPIKE_NAME:<22} -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID_SPIKE else 'OK'}  "
                 f"TP/SL={SPIKE_TP_PCT*100:.1f}%/{SPIKE_SL_PCT*100:.1f}%  "
                 f"range>={SPIKE_RANGE_MULT}x  vol>={SPIKE_VOL_MULT}x")
-    logger.info(f"  LONG/SHORT cũ (vượt BB)    -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID_H1 else 'OK'}  "
+    logger.info(f"  {KEO_LEGACY_NAME:<22} -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID_H1 else 'OK'}  "
                 f"TP/SL={LEGACY_TP_PCT*100:.1f}%/{LEGACY_SL_PCT*100:.1f}%")
+    logger.info(f"  {KEO_MIDCROSS_NAME:<22} -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID_MIDCROSS else 'OK'}  "
+                f"TP={MIDCROSS_TP_PCT*100:.1f}%  SL=RSI qua {MIDCROSS_RSI_LONG_STOP}/{MIDCROSS_RSI_SHORT_STOP}  "
+                f"vol>={MIDCROSS_VOL_MULT}x")
     logger.info(f"  BB        : period={BB_PERIOD}  std={BB_STD}")
     logger.info(f"  Cooldown  : {ALERT_COOLDOWN_MINUTES} phút (mới/đột biến)  |  "
                 f"{LEGACY_ALERT_COOLDOWN_MINUTES // 60} tiếng (cũ)")
@@ -851,6 +1188,7 @@ async def _check_telegram_connections() -> None:
     await _check_telegram_connection(TELEGRAM_CHAT_ID, "NEW-H1")
     await _check_telegram_connection(TELEGRAM_CHAT_ID_H1, "LEGACY-SHORT-H1")
     await _check_telegram_connection(TELEGRAM_CHAT_ID_SPIKE, "SPIKE")
+    await _check_telegram_connection(TELEGRAM_CHAT_ID_MIDCROSS, "MIDCROSS")
 
 
 async def _run_forever(label: str, feed: LiveFeed) -> None:
@@ -864,6 +1202,45 @@ async def _run_forever(label: str, feed: LiveFeed) -> None:
             await asyncio.sleep(10)
 
 
+async def daily_stats_scheduler(stats_list: list[DailyStats], executor,
+                                 executor_targets: list[tuple[str, str]]) -> None:
+    """Gửi thống kê cuối ngày cho từng kèo lúc 23:55 — mỗi kèo về đúng kênh của nó.
+    stats_list: kèo KHÔNG trade thật -> ước lượng theo nến (DailyStats.build_message).
+    executor_targets: list các (chat_id, tên_kèo) CÓ trade thật qua executor (dùng chung 1
+    executor/tài khoản cho nhiều kèo) -> lấy PnL THẬT riêng cho từng kèo (build_daily_stats_message),
+    không phải ước lượng. Reset lại bộ đếm (cả 2 loại) sau khi gửi."""
+    while True:
+        now = datetime.now()
+        target = now.replace(hour=23, minute=55, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        wait = (target - now).total_seconds()
+        logger.info(f"[DailyStats] Thống kê tiếp theo lúc {target.strftime('%H:%M %d/%m')} "
+                    f"(còn {wait / 3600:.1f}h)")
+        await asyncio.sleep(wait)
+
+        today_str = datetime.now().strftime("%d/%m/%Y")
+        for stats in stats_list:
+            try:
+                await _send_telegram_message(stats.chat_id, stats.build_message(today_str), f"STATS-{stats.name}")
+            except Exception as e:
+                logger.error(f"[DailyStats] Gửi thống kê {stats.name} lỗi: {e}")
+            stats.reset()
+
+        if executor is not None:
+            for chat_id, title in executor_targets:
+                try:
+                    await _send_telegram_message(
+                        chat_id, executor.build_daily_stats_message(today_str, chat_id, title),
+                        f"STATS-{title}",
+                    )
+                except Exception as e:
+                    logger.error(f"[DailyStats] Gửi thống kê {title} lỗi: {e}")
+            executor.reset_daily_stats()
+
+        await asyncio.sleep(61)   # tránh kích hoạt 2 lần trong cùng phút
+
+
 async def _main() -> None:
     _banner()
     await _check_telegram_connections()
@@ -874,56 +1251,82 @@ async def _main() -> None:
 
         feed = LiveFeed(all_symbols, INTERVAL_H1, CANDLE_BUFFER)
 
+        h1_stats        = DailyStats(KEO_RUTRAU_NAME, TELEGRAM_CHAT_ID)
+        legacy_stats    = DailyStats(KEO_LEGACY_NAME, TELEGRAM_CHAT_ID_H1)
+        midcross_stats  = DailyStats(KEO_MIDCROSS_NAME, TELEGRAM_CHAT_ID_MIDCROSS)
+
         long_scanner = Scanner(
-            symbols, INTERVAL_H1_DISPLAY, TELEGRAM_CHAT_ID,
+            symbols, KEO_RUTRAU_NAME, TELEGRAM_CHAT_ID,
             detect_fn=lambda s, c: detect_signal(s, c, direction="LONG"),
             tp_pct=DOJI_TP_PCT, sl_pct=DOJI_SL_PCT,
+            daily_stats=h1_stats,
         )
         short_scanner = Scanner(
-            symbols, INTERVAL_H1_DISPLAY, TELEGRAM_CHAT_ID,
+            symbols, KEO_RUTRAU_NAME, TELEGRAM_CHAT_ID,
             detect_fn=lambda s, c: detect_signal(s, c, direction="SHORT"),
             tp_pct=DOJI_TP_PCT, sl_pct=DOJI_SL_PCT,
+            daily_stats=h1_stats,
         )
         legacy_long_scanner = Scanner(
-            legacy_symbols, INTERVAL_H1_DISPLAY, TELEGRAM_CHAT_ID_H1,
-            detect_fn=lambda s, c: detect_legacy_signal(s, c, direction="LONG"),
+            legacy_symbols, KEO_LEGACY_NAME, TELEGRAM_CHAT_ID_H1,
+            detect_fn=lambda s, c: detect_legacy_signal(s, c, band="UPPER"),   # vượt band trên -> LONG
             tp_pct=LEGACY_TP_PCT, sl_pct=LEGACY_SL_PCT,
             message_builder=_build_legacy_message,
             cooldown_minutes=LEGACY_ALERT_COOLDOWN_MINUTES,
+            daily_stats=legacy_stats,
         )
         legacy_short_scanner = Scanner(
-            legacy_symbols, INTERVAL_H1_DISPLAY, TELEGRAM_CHAT_ID_H1,
-            detect_fn=lambda s, c: detect_legacy_signal(s, c, direction="SHORT"),
+            legacy_symbols, KEO_LEGACY_NAME, TELEGRAM_CHAT_ID_H1,
+            detect_fn=lambda s, c: detect_legacy_signal(s, c, band="LOWER"),   # vượt band dưới -> SHORT
             tp_pct=LEGACY_TP_PCT, sl_pct=LEGACY_SL_PCT,
             cooldown_minutes=LEGACY_ALERT_COOLDOWN_MINUTES,
             message_builder=_build_legacy_message,
+            daily_stats=legacy_stats,
         )
         executor = None
         if ENABLE_AUTO_TRADE and TradeExecutor is not None:
-            notify        = lambda text: _send_telegram_message(TELEGRAM_CHAT_ID_SPIKE, text, "EXECUTOR")
-            notify_always = lambda text: _send_telegram_message(TELEGRAM_CHAT_ID_SPIKE, text, "EXECUTOR-INFO")
-            executor = await TradeExecutor.create(notify, notify_always)
-            logger.warning("[Executor] AUTO-TRADE ĐANG BẬT (TÀI KHOẢN THẬT) — bot sẽ tự đặt lệnh tiền thật")
+            notify        = lambda chat_id, text: _send_telegram_message(chat_id, text, "EXECUTOR")
+            notify_always = lambda chat_id, text: _send_telegram_message(chat_id, text, "EXECUTOR-INFO")
+            executor = await TradeExecutor.create(notify, notify_always, default_chat_id=TELEGRAM_CHAT_ID_SPIKE)
+            logger.warning("[Executor] AUTO-TRADE ĐANG BẬT (TÀI KHOẢN THẬT) — bot sẽ tự đặt lệnh tiền thật "
+                            "cho cả kèo Đột Biến và kèo BB RSI H1")
             await executor.reconcile_on_startup(set(symbols))
 
         spike_scanner = SpikeScanner(
             symbols, TELEGRAM_CHAT_ID_SPIKE, tp_pct=SPIKE_TP_PCT, sl_pct=SPIKE_SL_PCT,
             executor=executor,
         )
+        midcross_scanner = MidCrossScanner(
+            symbols, TELEGRAM_CHAT_ID_MIDCROSS, daily_stats=midcross_stats, executor=executor,
+        )
 
         for sc in (long_scanner, short_scanner, legacy_long_scanner, legacy_short_scanner,
                    spike_scanner):
             feed.on_closed_candle(sc.on_closed_candle)
             feed.on_live_tick(sc.on_live_tick)
+        feed.on_closed_candle(midcross_scanner.on_closed_candle)   # chỉ xét nến đã đóng (xem MidCrossScanner)
+
+        # BB RSI H1 trade thật (có executor) -> thống kê ngày lấy PnL THẬT qua executor thay vì
+        # ước lượng theo nến (midcross_stats), tránh gửi trùng 2 tin cho cùng 1 kênh.
+        if executor is not None:
+            regular_stats    = [h1_stats, legacy_stats]
+            executor_targets = [(TELEGRAM_CHAT_ID_SPIKE, KEO_SPIKE_NAME),
+                                 (TELEGRAM_CHAT_ID_MIDCROSS, KEO_MIDCROSS_NAME)]
+        else:
+            regular_stats    = [h1_stats, legacy_stats, midcross_stats]
+            executor_targets = []
+
+        stats_tasks = [daily_stats_scheduler(regular_stats, executor, executor_targets)]
 
         if executor is not None:
             await asyncio.gather(
                 _run_forever("LiveFeed", feed),
                 executor.run_user_data_stream(),
                 executor.run_reconciliation_loop(set(symbols)),
+                *stats_tasks,
             )
         else:
-            await _run_forever("LiveFeed", feed)
+            await asyncio.gather(_run_forever("LiveFeed", feed), *stats_tasks)
     except KeyboardInterrupt:
         logger.info("Bot dừng.")
     except Exception as e:

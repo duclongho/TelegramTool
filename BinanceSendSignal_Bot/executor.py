@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-Executor tu dong dat lenh len Binance Futures TAI KHOAN THAT dua theo tin hieu
-LONG/SHORT DOT BIEN (Spike) tu longH4Future.py.
+Executor tu dong dat lenh len Binance Futures TAI KHOAN THAT dua theo tin hieu tu
+longH4Future.py. DUNG CHUNG 1 executor (1 tai khoan) cho NHIEU keo tra thuc real-money
+(hien tai: keo Dot Bien (Spike) va keo BB RSI H1 (midcross)) -> moi lenh mo/dong deu
+kem chat_id rieng de bao dung kenh Telegram cua keo da mo lenh do, va thong ke PnL
+ngay cung duoc tach rieng theo tung chat_id (xem build_daily_stats_message).
 
 CANH BAO: file nay dieu khien tien THAT (goi thang fapi.binance.com). Kiem tra ky
-API_KEY/API_SECRET va cac tham so rui ro (FIXED_RISK_USD, DAILY_LOSS_LIMIT_USD,
-LEVERAGE) truoc khi bat ENABLE_AUTO_TRADE.
+API_KEY/API_SECRET va cac tham so rui ro (FIXED_RISK_USD la mac dinh, tung keo co the
+tu truyen risk_usd rieng khi goi open_position; DAILY_LOSS_LIMIT_USD, LEVERAGE la
+GIOI HAN CHUNG cho toan tai khoan/moi keo) truoc khi bat ENABLE_AUTO_TRADE.
 
 An toan mac dinh: ENABLE_AUTO_TRADE = False -> khong dat lenh gi ca, chi log.
 """
@@ -26,16 +30,18 @@ logger = logging.getLogger("executor")
 # ═══════════════════════════════════════════════
 #  CẤU HÌNH — chỉnh ở đây
 # ═══════════════════════════════════════════════
-ENABLE_AUTO_TRADE = True   # BẬT = True để bot THỰC SỰ đặt lệnh TIỀN THẬT. Đang BẬT — đã kiểm
-                            # tra kết nối OK từ VPS, cấu hình rủi ro đã chốt ($0.5/lệnh, 5x, $3/ngày).
+ENABLE_AUTO_TRADE = True   # BẬT = True để bot THỰC SỰ đặt lệnh TIỀN THẬT (áp dụng cho MỌI kèo
+                            # có gắn executor). Đang BẬT — đã kiểm tra kết nối OK từ VPS, risk
+                            # mỗi lệnh do từng kèo tự truyền riêng (Đột Biến: $1/8x; BB RSI H1:
+                            # $2/8x), giới hạn lỗ ngày $100 dùng CHUNG cho toàn tài khoản.
 
 # Lấy tại: đăng nhập binance.com bằng tài khoản Binance THẬT -> Account -> API Management
 # -> Create API -> System generated -> CHỈ bật quyền "Futures", KHÔNG bật Withdrawals.
 API_KEY    = "FPaPRx6ECzzQ25RgVqjozp3qsFMrc5u3vQScdfecy7oZUEs7UKUcdjdixtb03uNI"
 API_SECRET = "t7MqGdFRTAyVLmRhzRn7o3ixHEU83YnJzqsQUsPpxfkiktqsOQ7crQSisCqM6FYw"
 
-FIXED_RISK_USD = 0.5   # Rủi ro CỐ ĐỊNH mỗi lệnh (USDT) — mất đúng số này nếu dính SL, không phụ thuộc % vốn
-LEVERAGE       = 5      # Đòn bẩy mặc định cho mọi symbol
+FIXED_RISK_USD = 1.0   # Rủi ro CỐ ĐỊNH mỗi lệnh (USDT) — mất đúng số này nếu dính SL, không phụ thuộc % vốn
+LEVERAGE       = 8      # Đòn bẩy mặc định cho mọi symbol
 MARGIN_TYPE     = "ISOLATED"   # ISOLATED | CROSSED
 
 MAX_CONCURRENT_POSITIONS = 5      # Số lệnh mở đồng thời tối đa (toàn bộ executor, không phải mỗi symbol)
@@ -71,36 +77,45 @@ class TradeExecutor:
     """Đặt lệnh MARKET vào lệnh + STOP_MARKET/TAKE_PROFIT_MARKET (closePosition=True) để
     thoát lệnh, theo dõi khớp lệnh qua User Data Stream để dọn lệnh còn treo + tính PnL ngày."""
 
-    def __init__(self, client: AsyncClient, notify, notify_always=None) -> None:
+    def __init__(self, client: AsyncClient, notify, notify_always=None, default_chat_id: str = "") -> None:
         self.client = client
-        self.notify = notify   # async callable(str) -> gửi Telegram báo kết quả lệnh
-        # async callable(str) -> dùng cho cảnh báo quan trọng cần thấy ngay (vd: symbol
-        # không giao dịch được) — mặc định giống notify, tách riêng để dễ tuỳ biến sau.
+        self.notify = notify   # async callable(chat_id: str, text: str) -> gửi Telegram báo kết quả lệnh
+        # async callable(chat_id: str, text: str) -> dùng cho cảnh báo quan trọng cần thấy
+        # ngay (vd: symbol không giao dịch được) — mặc định giống notify, tách riêng để dễ tuỳ biến sau.
         self.notify_always = notify_always or notify
+        # Dùng cho các sự kiện KHÔNG gắn với 1 kèo cụ thể (vị thế mồ côi phát hiện lúc quét,
+        # không biết kèo nào đã mở; cảnh báo tắt auto-trade do chạm giới hạn lỗ ngày — ảnh
+        # hưởng CHUNG mọi kèo, không riêng kèo nào).
+        self._default_chat_id = default_chat_id
         self._filters_cache: dict[str, _SymbolFilters] = {}
         self._leverage_set: set[str] = set()
-        self._open_positions: dict[str, dict] = {}   # symbol -> {"direction":..., "qty":...}
+        self._open_positions: dict[str, dict] = {}   # symbol -> {"direction":..., "qty":..., "chat_id":...}
         self._known_untradeable: set[str] = set()   # symbol không giao dịch được (đã xác nhận qua API)
-        self._daily_pnl       = 0.0
+        self._daily_pnl       = 0.0   # tổng PnL ngày CHUNG mọi kèo — dùng để kiểm tra DAILY_LOSS_LIMIT_USD
         self._daily_pnl_date  = date.today()
-        self.auto_trade_enabled = True   # có thể bị tự tắt khi chạm daily loss limit
+        self._daily_wins      = 0   # số lệnh chốt TP trong ngày (chung mọi kèo)
+        self._daily_losses    = 0   # số lệnh dính SL trong ngày (chung mọi kèo)
+        # Thống kê PnL ngày TÁCH RIÊNG theo từng kèo (key = chat_id) — để mỗi kèo nhận đúng
+        # số của mình trong tin tổng kết cuối ngày, dù dùng chung 1 executor/tài khoản.
+        self._daily_stats_by_chat: dict[str, dict] = {}
+        self.auto_trade_enabled = True   # có thể bị tự tắt khi chạm daily loss limit (ảnh hưởng CHUNG mọi kèo)
         self._cached_balance: Optional[float] = None   # cập nhật cục bộ, tránh gọi REST mỗi lần vào lệnh
 
     @classmethod
-    async def create(cls, notify, notify_always=None) -> "TradeExecutor":
+    async def create(cls, notify, notify_always=None, default_chat_id: str = "") -> "TradeExecutor":
         client = await AsyncClient.create(API_KEY, API_SECRET)   # gọi thẳng fapi.binance.com (sàn thật)
-        self = cls(client, notify, notify_always)
+        self = cls(client, notify, notify_always, default_chat_id)
         await self._preload_filters()
         self._cached_balance = await self._fetch_balance()
         return self
 
-    async def _mark_untradeable(self, symbol: str, reason: str) -> None:
+    async def _mark_untradeable(self, symbol: str, reason: str, chat_id: str) -> None:
         """Đánh dấu symbol không giao dịch được — chỉ báo Telegram 1 lần/symbol
         (tránh spam lặp lại mỗi lần có tín hiệu mới cho cùng symbol)."""
         if symbol in self._known_untradeable:
             return
         self._known_untradeable.add(symbol)
-        await self.notify_always(f"⚠️ {symbol}: Không giao dịch được ({reason})")
+        await self.notify_always(chat_id, f"⚠️ {symbol}: Không giao dịch được ({reason})")
 
     async def close(self) -> None:
         await self.client.close_connection()
@@ -192,14 +207,42 @@ class TradeExecutor:
         self._leverage_set.add(symbol)
         return True
 
+    def reset_daily_stats(self) -> None:
+        """Reset bộ đếm PnL/thắng/thua trong ngày (CHUNG + theo từng kèo) — gọi tường minh
+        từ daily_stats_scheduler (longH4Future.py) sau khi đã gửi thống kê cuối ngày lúc
+        23:55, HOẶC tự động (lazy) qua _reset_daily_if_needed nếu vì lý do gì đó scheduler
+        chưa kịp chạy."""
+        self._daily_pnl_date     = date.today()
+        self._daily_pnl          = 0.0
+        self._daily_wins         = 0
+        self._daily_losses       = 0
+        self._daily_stats_by_chat = {}
+        if not self.auto_trade_enabled:
+            self.auto_trade_enabled = True
+            logger.info("[Executor] Reset ngày mới — bật lại auto-trade (đã bị tắt do chạm giới hạn lỗ ngày hôm qua)")
+
     def _reset_daily_if_needed(self) -> None:
-        today = date.today()
-        if today != self._daily_pnl_date:
-            self._daily_pnl_date  = today
-            self._daily_pnl       = 0.0
-            if not self.auto_trade_enabled:
-                self.auto_trade_enabled = True
-                logger.info("[Executor] Sang ngày mới — bật lại auto-trade (đã bị tắt do chạm giới hạn lỗ ngày hôm qua)")
+        if date.today() != self._daily_pnl_date:
+            self.reset_daily_stats()
+
+    def build_daily_stats_message(self, date_label: str, chat_id: str, title: str) -> str:
+        """Thống kê PnL THẬT trong ngày CHO 1 KÈO cụ thể (theo chat_id đã mở lệnh, dựa trên
+        _apply_close, lấy từ income history thật trên sàn — không phải ước lượng theo nến).
+        Nhiều kèo có thể dùng chung 1 executor -> mỗi kèo có số riêng, không bị trộn lẫn."""
+        stats = self._daily_stats_by_chat.get(chat_id, {"wins": 0, "losses": 0, "pnl": 0.0})
+        wins, losses, pnl = stats["wins"], stats["losses"], stats["pnl"]
+        closed = wins + losses
+        win_rate = f"{wins / closed * 100:.0f}%" if closed else "—"
+        icon = "📈" if pnl >= 0 else "📉"
+        sign = "+" if pnl >= 0 else ""
+        return (
+            f"📊 *TỔNG KẾT NGÀY — {title} — {date_label}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📥 Tổng lệnh đóng: *{closed}*\n"
+            f"✅ Thắng (TP): *{wins}*  |  🛑 Thua (SL): *{losses}*\n"
+            f"📊 Tỉ lệ thắng: *{win_rate}*\n"
+            f"{icon} Net PnL: *{sign}{pnl:.2f} USDT*"
+        )
 
     # --- NHẬN THEO DÕI VỊ THẾ MỒ CÔI (chưa có trong _open_positions) ---
     async def _scan_and_adopt_orphaned_positions(self, symbols: set[str], context: str) -> None:
@@ -268,6 +311,8 @@ class TradeExecutor:
                 "direction": direction, "qty": abs(amt),
                 "margin": abs(amt) * entry_price / LEVERAGE,
                 "opened_at": int(time.time() * 1000),
+                # Không biết vị thế mồ côi này do kèo nào mở -> báo về kênh mặc định.
+                "chat_id": self._default_chat_id,
             }
             adopted.append(f"{direction} {symbol} {abs(amt)}@{entry_price}")
 
@@ -275,6 +320,7 @@ class TradeExecutor:
             logger.warning(f"[Executor] Đã nhận theo dõi {len(adopted)} vị thế mồ côi ({context}): "
                             f"{', '.join(adopted)}")
             await self.notify(
+                self._default_chat_id,
                 f"🔄 🔴 {context} — đã nhận theo dõi {len(adopted)} vị thế đang mở sẵn:\n"
                 + "\n".join(adopted)
             )
@@ -289,7 +335,11 @@ class TradeExecutor:
     # --- MỞ LỆNH ---
     async def open_position(self, symbol: str, direction: Literal["LONG", "SHORT"],
                              entry_price: float, sl_price: float, tp_price: float,
-                             sl_pct: float, tp_pct: float) -> None:
+                             sl_pct: float, tp_pct: float, chat_id: str,
+                             risk_usd: float = FIXED_RISK_USD) -> None:
+        """chat_id: kênh Telegram của kèo đã phát tín hiệu này — dùng để báo ĐÚNG kênh khi
+        mở/đóng lệnh (nhiều kèo có thể dùng chung 1 executor/tài khoản). risk_usd: rủi ro
+        cố định ($) riêng cho kèo này (mặc định FIXED_RISK_USD nếu kèo không tự truyền)."""
         if not ENABLE_AUTO_TRADE:
             return
         self._reset_daily_if_needed()
@@ -315,7 +365,7 @@ class TradeExecutor:
             sl_distance = abs(entry_price - sl_price)
             if sl_distance <= 0:
                 return
-            raw_qty = FIXED_RISK_USD / sl_distance   # rủi ro CỐ ĐỊNH ($), không phụ thuộc % vốn
+            raw_qty = risk_usd / sl_distance   # rủi ro CỐ ĐỊNH ($) riêng theo kèo, không phụ thuộc % vốn
 
             try:
                 filters = await self._get_filters(symbol)
@@ -324,7 +374,7 @@ class TradeExecutor:
                 # phiếu token hoá, hoặc symbol quá mới chưa được liệt kê đầy đủ) -> bỏ
                 # qua gọn gàng, không phải lỗi hệ thống.
                 logger.info(f"[Executor] {symbol}: không có trong exchangeInfo, bỏ qua tín hiệu này")
-                await self._mark_untradeable(symbol, "không có trong exchangeInfo")
+                await self._mark_untradeable(symbol, "không có trong exchangeInfo", chat_id)
                 return
             qty = _round_step(raw_qty, filters.step_size)
             if qty < float(filters.min_qty) or qty <= 0:
@@ -340,7 +390,7 @@ class TradeExecutor:
                 return
 
             if not await self._ensure_leverage(symbol):
-                await self._mark_untradeable(symbol, "đặt đòn bẩy thất bại")
+                await self._mark_untradeable(symbol, "đặt đòn bẩy thất bại", chat_id)
                 return
 
             side          = "BUY" if direction == "LONG" else "SELL"
@@ -418,10 +468,11 @@ class TradeExecutor:
 
             self._open_positions[symbol] = {
                 "direction": direction, "qty": filled_qty, "margin": actual_margin,
-                "opened_at": int(time.time() * 1000),
+                "opened_at": int(time.time() * 1000), "chat_id": chat_id,
             }
             dir_icon = "🟢" if direction == "LONG" else "🔴"
             await self.notify(
+                chat_id,
                 f"🤖 {dir_icon} Đã mở {direction} {symbol}{partial_note}\n"
                 f"Entry: {actual_entry}\n"
                 f"TP: {tp_rounded}\n"
@@ -434,10 +485,10 @@ class TradeExecutor:
                 # diện Binance trước, không thể xử lý qua API -> chỉ log rõ, bỏ qua.
                 logger.warning(f"[Executor] {symbol}: cần ký thoả thuận TradFi-Perps trên "
                                f"Binance trước khi bot có thể giao dịch symbol này, bỏ qua")
-                await self._mark_untradeable(symbol, "cần ký thoả thuận TradFi-Perps trên Binance")
+                await self._mark_untradeable(symbol, "cần ký thoả thuận TradFi-Perps trên Binance", chat_id)
             elif e.code == -1121:
                 logger.error(f"[Executor] {symbol}: Binance API lỗi khi mở lệnh: {e}")
-                await self._mark_untradeable(symbol, "symbol không hợp lệ (-1121)")
+                await self._mark_untradeable(symbol, "symbol không hợp lệ (-1121)", chat_id)
             else:
                 logger.error(f"[Executor] {symbol}: Binance API lỗi khi mở lệnh: {e}")
         except Exception as e:
@@ -446,22 +497,38 @@ class TradeExecutor:
     # --- DỌN DẸP + BÁO ĐÓNG LỆNH (dùng chung cho cả 2 nguồn phát hiện bên dưới) ---
     async def _apply_close(self, symbol: str, direction: str, result: str,
                             realized_pnl: float, note: str = "") -> None:
+        closed = self._open_positions.get(symbol, {})
+        chat_id = closed.get("chat_id") or self._default_chat_id
+
         self._daily_pnl += realized_pnl
+        if result == "TP":
+            self._daily_wins += 1
+        elif result == "SL":
+            self._daily_losses += 1
+
+        chat_stats = self._daily_stats_by_chat.setdefault(chat_id, {"wins": 0, "losses": 0, "pnl": 0.0})
+        chat_stats["pnl"] += realized_pnl
+        if result == "TP":
+            chat_stats["wins"] += 1
+        elif result == "SL":
+            chat_stats["losses"] += 1
+
         if self._cached_balance is not None:
-            closed = self._open_positions.get(symbol, {})
             self._cached_balance += closed.get("margin", 0.0) + realized_pnl
         self._open_positions.pop(symbol, None)
 
         icon = "✅" if result == "TP" else ("🛑" if result == "SL" else "ℹ️")
         await self.notify(
+            chat_id,
             f"{icon} 🔴 Đóng {direction} {symbol} [{result}]{note} "
             f"| PnL: {realized_pnl:+.2f} USDT | PnL ngày: {self._daily_pnl:+.2f} USDT"
         )
 
         if self.auto_trade_enabled and self._daily_pnl <= -DAILY_LOSS_LIMIT_USD:
             self.auto_trade_enabled = False
-            await self.notify(
-                f"⛔ 🔴 Đã TẮT auto-trade — lỗ ngày chạm giới hạn "
+            await self.notify_always(
+                self._default_chat_id,
+                f"⛔ 🔴 Đã TẮT auto-trade (TOÀN BỘ KÈO) — lỗ ngày chạm giới hạn "
                 f"${DAILY_LOSS_LIMIT_USD:.0f} ({self._daily_pnl:+.2f} USDT)"
             )
 
@@ -477,6 +544,54 @@ class TradeExecutor:
             await self.client.futures_cancel_all_open_orders(symbol=symbol)
         except BinanceAPIException:
             pass   # không có lệnh thường nào để huỷ -> bỏ qua, không phải lỗi
+
+    # --- ĐÓNG LỆNH THEO TÍN HIỆU KHÔNG PHẢI GIÁ (vd: SL theo RSI của kèo BB RSI H1) ---
+    async def close_position_market(self, symbol: str, reason: str) -> None:
+        """Đóng vị thế NGAY bằng lệnh MARKET (reduceOnly) — dùng khi điều kiện thoát KHÔNG
+        phải mốc giá cố định nên không đặt được STOP_MARKET trên sàn từ lúc vào lệnh (vd
+        kèo BB RSI H1: cắt lỗ theo RSI, bot phải tự canh rồi đóng tay). Huỷ algo order (TP +
+        SL an toàn dự phòng) TRƯỚC khi đóng để tránh race (algo khớp đúng lúc ta cũng đóng).
+        Nếu huỷ xong phát hiện vị thế đã về 0 (algo vừa khớp kịp trước đó) thì để đường xử
+        lý mồ côi/thông thường báo đúng TP/SL thật, khỏi tự suy đoán sai."""
+        if symbol not in self._open_positions:
+            return
+        pos = self._open_positions[symbol]
+        direction = pos.get("direction", "?")
+        opposite_side = "SELL" if direction == "LONG" else "BUY"
+
+        await self._cancel_leftover_orders(symbol)
+
+        try:
+            amt, _ = await self._get_position(symbol)
+        except Exception as e:
+            logger.error(f"[Executor] {symbol}: lỗi kiểm tra vị thế trước khi đóng ({reason}): {e}")
+            return
+
+        if amt <= 0:
+            if symbol in self._open_positions:
+                await self._handle_position_closed_externally(symbol)
+            return
+
+        try:
+            await self.client.futures_create_order(
+                symbol=symbol, side=opposite_side, type="MARKET",
+                quantity=amt, reduceOnly=True,
+            )
+        except BinanceAPIException as e:
+            logger.error(f"[Executor] {symbol}: đóng lệnh MARKET ({reason}) lỗi: {e}")
+            return
+
+        realized_pnl = 0.0
+        try:
+            income = await self.client.futures_income_history(
+                symbol=symbol, incomeType="REALIZED_PNL",
+                startTime=pos.get("opened_at", 0), limit=50,
+            )
+            realized_pnl = sum(float(i["income"]) for i in income)
+        except Exception as e:
+            logger.warning(f"[Executor] {symbol}: không lấy được realized PnL sau khi đóng ({reason}): {e}")
+
+        await self._apply_close(symbol, direction, "SL", realized_pnl, note=f" ({reason})")
 
     # --- THEO DÕI KHỚP LỆNH (User Data Stream) ---
     async def _handle_order_update(self, order: dict) -> None:
