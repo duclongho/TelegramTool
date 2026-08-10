@@ -962,8 +962,24 @@ class SpikeScanner:
         if bar_open is not None and self._last_signal_bar.get(symbol) == bar_open:
             return   # Nến này đã có 1 tín hiệu đột biến (Long hoặc Short) gửi rồi — bỏ qua
 
-        signal = (detect_spike_signal(symbol, candles, live_candle, direction="SHORT")
-                  or detect_spike_signal(symbol, candles, live_candle, direction="LONG"))
+        # Xác định hướng biến động CHÍNH của nến này (tính TỪ OPEN, không phải từ high/low
+        # tuyệt đối) rồi CHỈ test đúng 1 hướng đó — trước đây luôn test SHORT trước ("or"), nên
+        # nếu giá đã kẹt sẵn phía BÊN TRÊN band từ nến trước (kế thừa, không phải biến động mới
+        # trong chính nến này) rồi đảo chiều RƠI mạnh xuyên sang band dưới, code vẫn chọn nhầm
+        # SHORT (vì điều kiện "high > bb_upper" vẫn đúng do kế thừa) dù biến động THẬT của nến
+        # là 1 cú RƠI — đã xảy ra thực tế với AAPLUSDT ngày 10/08/2026 (chốt tại 314.03, vốn đã
+        # trên BB trên từ nến trước, rồi rơi thẳng xuyên BB dưới xuống 308.64 -> lẽ ra phải là
+        # LONG mới đúng bản chất "fade" cú rơi, nhưng code cũ luôn báo SHORT).
+        up_move   = live_candle["high"] - live_candle["open"]
+        down_move = live_candle["open"] - live_candle["low"]
+        if down_move > up_move:
+            dominant: Literal["LONG", "SHORT"] = "LONG"
+        elif up_move > down_move:
+            dominant = "SHORT"
+        else:
+            return   # 2 hướng bằng nhau (hiếm) -> không rõ hướng chính, bỏ qua cho an toàn
+
+        signal = detect_spike_signal(symbol, candles, live_candle, direction=dominant)
         if signal is None:
             return
 
