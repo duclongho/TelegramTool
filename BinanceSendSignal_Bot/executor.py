@@ -14,6 +14,7 @@ GIOI HAN CHUNG cho toan tai khoan/moi keo) truoc khi bat ENABLE_AUTO_TRADE.
 An toan mac dinh: ENABLE_AUTO_TRADE = False -> khong dat lenh gi ca, chi log.
 """
 import asyncio
+import json
 import logging
 import os
 import time
@@ -57,6 +58,20 @@ DEFAULT_TP_PCT = 0.025
 # (lệnh đang mở không bị đóng, chỉ chặn mở thêm) — xoá file để chạy lại bình thường.
 EMERGENCY_STOP_FILE = "EXECUTOR_STOP"
 
+# Lưu _open_positions ra đây mỗi lần thay đổi — để khi bot RESTART, biết lại ĐÚNG chat_id
+# (kèo nào đã mở lệnh nào), tránh bị coi là "mồ côi" và gán nhầm về kênh mặc định (xem
+# _restore_persisted_positions). Nằm cùng thư mục chạy bot, giống EMERGENCY_STOP_FILE.
+STATE_FILE = "executor_positions_state.json"
+
+# Đánh dấu chat_id cho vị thế bot TỰ PHÁT HIỆN (mồ côi lúc quét, hoặc đặt tay trên Binance) —
+# KHÔNG PHẢI do 1 kèo cụ thể tự bắn tín hiệu mở qua open_position(). Dùng giá trị này thay vì
+# gán bừa vào kênh mặc định để _apply_close() biết mà KHÔNG báo Telegram (mở lẫn đóng) cho các
+# vị thế này — tránh làm phiền kênh với hoạt động không phải do tool tạo ra. Vẫn được bot âm
+# thầm bảo vệ (tự đặt bổ sung SL/TP nếu thiếu) và vẫn tính vào _daily_pnl CHUNG (rủi ro thật
+# của toàn tài khoản, dùng cho DAILY_LOSS_LIMIT_USD) — chỉ không gắn vào thống kê riêng của kèo
+# nào và không gửi thông báo.
+EXTERNAL_POSITION_CHAT_ID = "__external__"
+
 
 @dataclass
 class _SymbolFilters:
@@ -90,6 +105,16 @@ class TradeExecutor:
         self._filters_cache: dict[str, _SymbolFilters] = {}
         self._leverage_set: set[str] = set()
         self._open_positions: dict[str, dict] = {}   # symbol -> {"direction":..., "qty":..., "chat_id":...}
+        # Symbol đang trong QUÁ TRÌNH mở lệnh (đã qua check, chưa kịp ghi vào _open_positions
+        # vì còn đang ở giữa các bước await — đặt MARKET, chờ xác nhận khớp, đặt SL/TP...).
+        # Giữ chỗ NGAY LÚC BẮT ĐẦU (đồng bộ, trước await đầu tiên) để chặn race: 2 kèo dùng
+        # chung executor (Đột Biến + BB RSI H1) cùng ra tín hiệu trên CÙNG 1 symbol trong lúc
+        # 1 trong 2 đang mở dở -> nếu không có cờ này, cả 2 cùng lọt qua check "symbol in
+        # self._open_positions" (lúc đó vẫn rỗng) và cùng đặt lệnh thật lên cùng symbol -> vị
+        # thế trên sàn bị gộp khối lượng 2 kèo + 2 cặp SL/TP (closePosition=True) đè lên nhau,
+        # và _open_positions[symbol] chỉ giữ được chat_id của kèo ghi SAU CÙNG -> kèo còn lại
+        # mất tích báo TP/SL + PnL bị cộng nhầm sang kèo kia (đã xảy ra thực tế).
+        self._opening: set[str] = set()
         self._known_untradeable: set[str] = set()   # symbol không giao dịch được (đã xác nhận qua API)
         self._daily_pnl       = 0.0   # tổng PnL ngày CHUNG mọi kèo — dùng để kiểm tra DAILY_LOSS_LIMIT_USD
         self._daily_pnl_date  = date.today()
@@ -119,6 +144,70 @@ class TradeExecutor:
 
     async def close(self) -> None:
         await self.client.close_connection()
+
+    # --- LƯU/NẠP STATE (chống mất chat_id khi bot restart) ---
+    def _save_state(self) -> None:
+        """Lưu _open_positions ra STATE_FILE mỗi khi thay đổi — lỗi ghi đĩa không được làm
+        gián đoạn luồng giao dịch, chỉ log."""
+        try:
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(self._open_positions, f)
+        except Exception as e:
+            logger.error(f"[Executor] Lỗi lưu state ra {STATE_FILE}: {e}")
+
+    def _load_state(self) -> dict:
+        try:
+            if not os.path.exists(STATE_FILE):
+                return {}
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"[Executor] Lỗi đọc state từ {STATE_FILE}: {e}")
+            return {}
+
+    async def _restore_persisted_positions(self, symbols: set[str]) -> None:
+        """Khôi phục _open_positions (quan trọng nhất là chat_id — biết đúng kèo nào đã mở)
+        từ STATE_FILE TRƯỚC khi quét mồ côi lúc khởi động. _open_positions vốn chỉ nằm
+        trong RAM -> mỗi lần bot RESTART là về rỗng, khiến MỌI vị thế đang mở (dù bot đã biết
+        rõ là của kèo nào) đều bị _scan_and_adopt_orphaned_positions coi là "mồ côi" và gán
+        nhầm về kênh mặc định (Spike) — đây chính là nguyên nhân thực tế "kèo A báo TP/SL ở
+        kênh của kèo B" sau khi bot reset/restart. Gọi hàm này trước để các vị thế đã biết từ
+        trước lấy lại ĐÚNG chat_id; chỉ còn vị thế THẬT SỰ chưa từng biết (vd manual, hoặc lỗi
+        xác nhận khớp) mới rơi vào nhánh mồ côi (gán kênh mặc định, không tránh được vì không
+        có thông tin gì khác)."""
+        saved = self._load_state()
+        if not saved:
+            return
+
+        restored, closed_while_down = [], []
+        for symbol, entry in saved.items():
+            if symbol not in symbols or symbol in self._open_positions:
+                continue
+            try:
+                amt, _ = await self._get_position(symbol)
+            except Exception as e:
+                logger.error(f"[Executor] {symbol}: lỗi kiểm tra vị thế lúc khôi phục state: {e}")
+                continue
+
+            if amt > 0:
+                self._open_positions[symbol] = entry
+                restored.append(f"{entry.get('direction', '?')} {symbol}")
+            else:
+                # Đã đóng (TP/SL/tay) trong lúc bot không chạy -> vẫn còn biết đúng chat_id
+                # từ state -> gán tạm để tái dùng _handle_position_closed_externally, báo lại
+                # đúng kênh/kèo thay vì im lặng bỏ qua.
+                self._open_positions[symbol] = entry
+                closed_while_down.append(symbol)
+
+        if restored:
+            logger.warning(f"[Executor] Khôi phục {len(restored)} vị thế từ state đã lưu "
+                            f"(đúng kèo/kênh, không bị gán nhầm): {', '.join(restored)}")
+        for symbol in closed_while_down:
+            logger.warning(f"[Executor] {symbol}: đã đóng trong lúc bot không chạy — báo lại "
+                            f"đúng kênh từ state đã lưu")
+            await self._handle_position_closed_externally(symbol)
+
+        self._save_state()
 
     # --- TIỆN ÍCH ---
     @staticmethod
@@ -274,6 +363,12 @@ class TradeExecutor:
                 continue
             if symbol in self._open_positions:
                 continue   # đã đang theo dõi rồi -> chỉ xử lý phần MỒ CÔI
+            if symbol in self._opening:
+                # 1 lệnh open_position() khác đang xử lý dở symbol này (đã đặt MARKET nhưng
+                # chưa kịp đặt xong SL/TP + ghi vào _open_positions) — KHÔNG được coi là mồ
+                # côi ở đây, nếu không sẽ bị đặt thêm 1 cặp SL/TP thứ 2 (mặc định) đè lên cặp
+                # sắp được open_position() tự đặt, gây lộn xộn y hệt race đã sửa ở open_position().
+                continue
 
             direction   = "LONG" if amt > 0 else "SHORT"
             entry_price = float(p["entryPrice"])
@@ -311,25 +406,31 @@ class TradeExecutor:
                 "direction": direction, "qty": abs(amt),
                 "margin": abs(amt) * entry_price / LEVERAGE,
                 "opened_at": int(time.time() * 1000),
-                # Không biết vị thế mồ côi này do kèo nào mở -> báo về kênh mặc định.
-                "chat_id": self._default_chat_id,
+                # Không phải do tool tự bắn tín hiệu mở (mồ côi/đặt tay) -> đánh dấu EXTERNAL,
+                # KHÔNG gắn vào kênh của kèo nào -> _apply_close() sẽ tự biết mà KHÔNG báo
+                # Telegram khi vị thế này đóng (xem khai báo EXTERNAL_POSITION_CHAT_ID).
+                "chat_id": EXTERNAL_POSITION_CHAT_ID,
             }
             adopted.append(f"{direction} {symbol} {abs(amt)}@{entry_price}")
 
         if adopted:
-            logger.warning(f"[Executor] Đã nhận theo dõi {len(adopted)} vị thế mồ côi ({context}): "
-                            f"{', '.join(adopted)}")
-            await self.notify(
-                self._default_chat_id,
-                f"🔄 🔴 {context} — đã nhận theo dõi {len(adopted)} vị thế đang mở sẵn:\n"
-                + "\n".join(adopted)
-            )
+            self._save_state()
+            # CHỈ log, KHÔNG báo Telegram — đây không phải kèo do tool tự bắn tín hiệu mở
+            # (mồ côi/đặt tay), báo lên kênh mặc định mỗi lần quét (kể cả quét định kỳ ~60s)
+            # sẽ gây nhiễu không cần thiết. Bot vẫn âm thầm bảo vệ (đã đặt bổ sung SL/TP nếu
+            # thiếu ở nhánh trên) — chỉ không thông báo việc nhận theo dõi này nữa.
+            logger.warning(f"[Executor] Đã nhận theo dõi {len(adopted)} vị thế mồ côi ({context}, "
+                            f"KHÔNG báo Telegram): {', '.join(adopted)}")
 
     async def reconcile_on_startup(self, symbols: set[str]) -> None:
-        """Gọi 1 lần lúc khởi động — xem _scan_and_adopt_orphaned_positions để biết lý do
-        bắt buộc phải có bước này."""
+        """Gọi 1 lần lúc khởi động. Thứ tự BẮT BUỘC: khôi phục state đã lưu (đúng chat_id)
+        TRƯỚC, rồi mới quét mồ côi (_scan_and_adopt_orphaned_positions) — nếu đảo ngược,
+        MỌI vị thế đang mở sẽ bị quét-mồ-côi xử lý trước và gán nhầm về kênh mặc định,
+        khiến bước khôi phục sau đó thấy symbol "đã có trong _open_positions" nên bỏ qua
+        luôn, không còn tác dụng."""
         if not ENABLE_AUTO_TRADE:
             return
+        await self._restore_persisted_positions(symbols)
         await self._scan_and_adopt_orphaned_positions(symbols, context="Khởi động")
 
     # --- MỞ LỆNH ---
@@ -352,6 +453,12 @@ class TradeExecutor:
             return
         if symbol in self._open_positions:
             return   # đã có lệnh mở cho symbol này
+        if symbol in self._opening:
+            # Có 1 lệnh KHÁC (kèo khác, hoặc chính kèo này bắn tín hiệu trùng) đang xử lý mở
+            # CHO CHÍNH symbol này, chưa xong -> bỏ qua, tránh mở trùng lên sàn (xem giải
+            # thích chi tiết ở khai báo self._opening trong __init__).
+            logger.info(f"[Executor] {symbol}: đang có lệnh khác xử lý mở cùng symbol này, bỏ qua để tránh trùng")
+            return
         if symbol in self._known_untradeable:
             logger.info(f"[Executor] {symbol}: đã biết không giao dịch được, bỏ qua")
             return
@@ -359,6 +466,7 @@ class TradeExecutor:
             logger.info(f"[Executor] {symbol}: bỏ qua — đã đạt tối đa {MAX_CONCURRENT_POSITIONS} lệnh mở đồng thời")
             return
 
+        self._opening.add(symbol)   # giữ chỗ NGAY — đồng bộ, không có await nào giữa check và add ở trên
         try:
             balance = await self._get_available_balance()
 
@@ -485,6 +593,7 @@ class TradeExecutor:
                 "direction": direction, "qty": filled_qty, "margin": actual_margin,
                 "opened_at": int(time.time() * 1000), "chat_id": chat_id,
             }
+            self._save_state()   # lưu ngay để không mất chat_id nếu bot restart trước khi đóng
             dir_icon = "🟢" if direction == "LONG" else "🔴"
             await self.notify(
                 chat_id,
@@ -508,14 +617,20 @@ class TradeExecutor:
                 logger.error(f"[Executor] {symbol}: Binance API lỗi khi mở lệnh: {e}")
         except Exception as e:
             logger.error(f"[Executor] {symbol}: lỗi không xác định khi mở lệnh: {e}", exc_info=True)
+        finally:
+            # LUÔN bỏ giữ chỗ dù thành công/lỗi/return sớm ở bất kỳ nhánh nào bên trên —
+            # nếu quên bước này, symbol sẽ bị kẹt vĩnh viễn trong self._opening và không kèo
+            # nào mở lại được nữa.
+            self._opening.discard(symbol)
 
     # --- DỌN DẸP + BÁO ĐÓNG LỆNH (dùng chung cho cả 2 nguồn phát hiện bên dưới) ---
     async def _apply_close(self, symbol: str, direction: str, result: str,
                             realized_pnl: float, note: str = "") -> None:
         closed = self._open_positions.get(symbol, {})
         chat_id = closed.get("chat_id") or self._default_chat_id
+        is_external = chat_id == EXTERNAL_POSITION_CHAT_ID   # mồ côi/đặt tay — không phải tool tự mở
 
-        self._daily_pnl += realized_pnl
+        self._daily_pnl += realized_pnl   # vẫn tính CHUNG (kể cả external) — bảo vệ rủi ro thật toàn tài khoản
         if result == "TP":
             self._daily_wins += 1
         elif result == "SL":
@@ -531,13 +646,20 @@ class TradeExecutor:
         if self._cached_balance is not None:
             self._cached_balance += closed.get("margin", 0.0) + realized_pnl
         self._open_positions.pop(symbol, None)
+        self._save_state()
 
-        icon = "✅" if result == "TP" else ("🛑" if result == "SL" else "ℹ️")
-        await self.notify(
-            chat_id,
-            f"{icon} 🔴 Đóng {direction} {symbol} [{result}]{note} "
-            f"| PnL: {realized_pnl:+.2f} USDT | PnL ngày: {self._daily_pnl:+.2f} USDT"
-        )
+        if is_external:
+            # Vị thế này bot chỉ ÂM THẦM bảo vệ (mồ côi/đặt tay), không phải do kèo nào tự
+            # bắn tín hiệu mở -> không báo Telegram, chỉ log để còn dấu vết khi cần tra.
+            logger.info(f"[Executor] {symbol}: đóng vị thế EXTERNAL (không do tool mở) [{result}]{note} "
+                        f"PnL={realized_pnl:+.2f} USDT — không báo Telegram")
+        else:
+            icon = "✅" if result == "TP" else ("🛑" if result == "SL" else "ℹ️")
+            await self.notify(
+                chat_id,
+                f"{icon} 🔴 Đóng {direction} {symbol} [{result}]{note} "
+                f"| PnL: {realized_pnl:+.2f} USDT | PnL ngày: {self._daily_pnl:+.2f} USDT"
+            )
 
         if self.auto_trade_enabled and self._daily_pnl <= -DAILY_LOSS_LIMIT_USD:
             self.auto_trade_enabled = False
@@ -560,12 +682,13 @@ class TradeExecutor:
         except BinanceAPIException:
             pass   # không có lệnh thường nào để huỷ -> bỏ qua, không phải lỗi
 
-    # --- ĐÓNG LỆNH THEO TÍN HIỆU KHÔNG PHẢI GIÁ (vd: SL theo RSI của kèo BB RSI H1) ---
+    # --- ĐÓNG LỆNH THEO TÍN HIỆU KHÔNG PHẢI GIÁ (dự phòng cho kèo tương lai cần thoát theo
+    # chỉ báo — hiện KHÔNG kèo nào dùng: BB RSI H1 đã chuyển hẳn về TP/SL giá cố định) ---
     async def close_position_market(self, symbol: str, reason: str) -> None:
         """Đóng vị thế NGAY bằng lệnh MARKET (reduceOnly) — dùng khi điều kiện thoát KHÔNG
-        phải mốc giá cố định nên không đặt được STOP_MARKET trên sàn từ lúc vào lệnh (vd
-        kèo BB RSI H1: cắt lỗ theo RSI, bot phải tự canh rồi đóng tay). Huỷ algo order (TP +
-        SL an toàn dự phòng) TRƯỚC khi đóng để tránh race (algo khớp đúng lúc ta cũng đóng).
+        phải mốc giá cố định nên không đặt được STOP_MARKET/TAKE_PROFIT_MARKET trên sàn từ lúc
+        vào lệnh (vd 1 kèo nào đó thoát theo chỉ báo, bot phải tự canh rồi đóng tay). Huỷ algo
+        order (TP/SL nếu có) TRƯỚC khi đóng để tránh race (algo khớp đúng lúc ta cũng đóng).
         Nếu huỷ xong phát hiện vị thế đã về 0 (algo vừa khớp kịp trước đó) thì để đường xử
         lý mồ côi/thông thường báo đúng TP/SL thật, khỏi tự suy đoán sai."""
         if symbol not in self._open_positions:
@@ -645,16 +768,44 @@ class TradeExecutor:
     # --- LƯỚI AN TOÀN DỰ PHÒNG (không phụ thuộc WS) ---
     RECONCILE_INTERVAL_SEC = 10
 
-    async def _determine_tp_or_sl(self, symbol: str) -> str:
+    async def _determine_tp_or_sl(self, symbol: str, opened_at: int = 0) -> str:
         """Tra lịch sử algo order để biết CHÍNH XÁC lệnh nào đã khớp thật, thay vì ghi
         chung chung "TP/SL". Đã xác nhận qua thực tế: lệnh nào khớp thật có algoStatus
         = "FINISHED", lệnh còn lại (không khớp, tự huỷ khi vị thế đã đóng) có algoStatus
-        = "EXPIRED" — dựa vào đó suy ra TAKE_PROFIT_MARKET/STOP_MARKET nào đã kích hoạt."""
+        = "EXPIRED" — dựa vào đó suy ra TAKE_PROFIT_MARKET/STOP_MARKET nào đã kích hoạt.
+
+        opened_at: mốc thời gian (ms) MỞ vị thế đang xử lý — BẮT BUỘC dùng để lọc, vì 1
+        symbol có thể đã có NHIỀU cặp SL/TP CŨ (FINISHED) từ các lần vào lệnh TRƯỚC ĐÓ
+        trên CÙNG symbol này (kèo Đột Biến cooldown chỉ 30 phút, dễ lặp lại nhiều lần/ngày).
+        Trước đây hàm này trả về lệnh FINISHED ĐẦU TIÊN tìm thấy trong 10 lệnh gần nhất mà
+        KHÔNG lọc theo thời gian -> rất dễ nhặt nhầm SL/TP của 1 LẦN VÀO LỆNH CŨ, không
+        phải của vị thế đang đóng -> gán SAI nhãn TP/SL dù số tiền PnL vẫn đúng (PnL lấy
+        riêng qua income_history, có lọc startTime đúng) -> đây chính là nguyên nhân thực
+        tế đã xảy ra: tổng kết ngày báo "7 lệnh đều SL" nhưng Net PnL vẫn dương (vì tiền
+        đúng, chỉ nhãn TP/SL sai). Fix: chỉ xét lệnh cập nhật SAU opened_at, và trong số đó
+        lấy lệnh FINISHED gần nhất (không phải đầu tiên tìm thấy)."""
         try:
-            algo_orders = await self.client.futures_get_all_algo_orders(symbol=symbol, limit=10)
-            for o in algo_orders:
-                if o.get("algoStatus") == "FINISHED":
-                    return "TP" if o.get("orderType") == "TAKE_PROFIT_MARKET" else "SL"
+            algo_orders = await self.client.futures_get_all_algo_orders(
+                symbol=symbol, startTime=opened_at, limit=20,
+            )
+
+            def _order_time(o: dict) -> int:
+                # Tên field thời gian không thống nhất giữa các phiên bản API algo order
+                # của Binance -> thử lần lượt vài tên phổ biến, mặc định 0 nếu không có.
+                for key in ("updateTime", "time", "bookTime"):
+                    if o.get(key):
+                        return int(o[key])
+                return 0
+
+            candidates = [
+                o for o in algo_orders
+                if o.get("algoStatus") == "FINISHED"
+                and o.get("orderType") in ("STOP_MARKET", "TAKE_PROFIT_MARKET")
+                and _order_time(o) >= opened_at
+            ]
+            if candidates:
+                latest = max(candidates, key=_order_time)
+                return "TP" if latest.get("orderType") == "TAKE_PROFIT_MARKET" else "SL"
         except Exception as e:
             logger.warning(f"[Executor] {symbol}: không xác định được TP/SL từ algo order: {e}")
         return "TP/SL"   # không tra được -> vẫn ghi chung chung, còn hơn báo sai
@@ -668,7 +819,7 @@ class TradeExecutor:
             return
         direction = pos.get("direction", "?")
 
-        result = await self._determine_tp_or_sl(symbol)
+        result = await self._determine_tp_or_sl(symbol, opened_at=pos.get("opened_at", 0))
         await self._cancel_leftover_orders(symbol)
 
         realized_pnl = 0.0

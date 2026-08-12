@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .env
+
+# Runtime state của bot (VPS) — không phải source code
+BinanceSendSignal_Bot/executor_positions_state.json
+BinanceSendSignal_Bot/EXECUTOR_STOP
