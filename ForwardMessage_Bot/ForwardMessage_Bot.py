@@ -127,15 +127,31 @@ async def handler(event):
     await asyncio.gather(*tasks)
 
 
+MAX_CAPTION_LEN = 1024  # Giới hạn caption khi gửi kèm media
+MAX_MESSAGE_LEN = 4096  # Giới hạn tin nhắn text thường
+
+
 async def send_to_group(chat_id, name, message, media):
     try:
-        await client.send_message(chat_id, message, file=media)
+        if media and message and len(message) > MAX_CAPTION_LEN:
+            # Caption đi kèm media chỉ được tối đa 1024 ký tự -> cắt caption,
+            # phần còn lại gửi tiếp bằng (các) tin nhắn text riêng
+            await client.send_message(chat_id, message[:MAX_CAPTION_LEN], file=media)
+            remaining = message[MAX_CAPTION_LEN:]
+            for i in range(0, len(remaining), MAX_MESSAGE_LEN):
+                await client.send_message(chat_id, remaining[i : i + MAX_MESSAGE_LEN])
+        elif not media and message and len(message) > MAX_MESSAGE_LEN:
+            # Tin nhắn text thường quá 4096 ký tự -> chia nhỏ để gửi
+            for i in range(0, len(message), MAX_MESSAGE_LEN):
+                await client.send_message(chat_id, message[i : i + MAX_MESSAGE_LEN])
+        else:
+            await client.send_message(chat_id, message, file=media)
         print(f" ✅ Gửi thành công -> {name}")
     except errors.FloodWaitError as e:
         print(f" ⏳ Bị giới hạn tốc độ. Chờ {e.seconds} giây...")
         await asyncio.sleep(e.seconds)
     except Exception as e:
-        print(f" ❌ Lỗi tại nhóm {chat_id}: {type(e).__name__}")
+        print(f" ❌ Lỗi tại nhóm {chat_id}: {type(e).__name__}: {e}")
 
 
 # --- CHƯƠNG TRÌNH CHÍNH ---
