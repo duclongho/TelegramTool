@@ -658,7 +658,7 @@ class TradeExecutor:
             await self.notify(
                 chat_id,
                 f"{icon} 🔴 Đóng {direction} {symbol} [{result}]{note} "
-                f"| PnL: {realized_pnl:+.2f} USDT | PnL ngày: {self._daily_pnl:+.2f} USDT"
+                f"| PnL: {realized_pnl:+.2f} USDT | PnL ngày: {chat_stats['pnl']:+.2f} USDT"
             )
 
         if self.auto_trade_enabled and self._daily_pnl <= -DAILY_LOSS_LIMIT_USD:

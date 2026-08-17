@@ -78,21 +78,24 @@ SPIKE_SL_PCT = 0.02    # Cắt lỗ cố định 2% (kèo BB H1 Đột Biến)
 LEGACY_TP_PCT = 0.01    # Chốt lời cố định 1% (kèo BB H1 Đóng Vượt Biên)
 LEGACY_SL_PCT = 0.01    # Cắt lỗ cố định 1% (kèo BB H1 Đóng Vượt Biên)
 
-# Kèo BB RSI H1 — BB biên giữa + RSI6: giá đi từ vùng dưới/trên (không cần chạm BB trên/dưới,
-# chỉ cần đang ở về phía đó) xuyên qua BB GIỮA, xác nhận bằng RSI(6) cắt ngưỡng 55/45 + volume
-# nến xuyên biên >= 1.5x nến trước. RSI CHỈ dùng để lọc điều kiện VÀO lệnh — TP/SL đều là mốc
-# giá CỐ ĐỊNH như các kèo khác (không còn thoát theo RSI), đặt thật bằng TAKE_PROFIT_MARKET/
-# STOP_MARKET trên sàn khi có executor (dùng chung executor với kèo Đột Biến).
+# Kèo BB RSI H1 — nến "xả/climax" cực trị RSI(6): LONG khi nến ĐẦU TIÊN đóng cửa đẩy RSI
+# xuống dưới 20 (giá đang giảm, nến phải GIẢM/đỏ — bắt đáy); SHORT khi nến ĐẦU TIÊN đóng cửa
+# đẩy RSI lên trên 80 (giá đang tăng, nến phải TĂNG/xanh — bán đỉnh). Nến tín hiệu phải "thân
+# mập ít râu" (thân >= MIDCROSS_BODY_MIN_RATIO, mỗi râu <= MIDCROSS_WICK_MAX_RATIO biên độ nến)
+# và volume >= MIDCROSS_VOL_MULT lần nến sát trước (không giới hạn trên). RSI CHỈ dùng để lọc
+# điều kiện VÀO lệnh + xét SL SỚM (xem MidCrossScanner._check_position: nếu nến NGAY SAU khi
+# vào lệnh vẫn đóng cửa ngoài vùng cực trị 20/80 thì huỷ lệnh sớm bằng lệnh MARKET) — TP/SL vẫn
+# LUÔN đặt thật bằng TAKE_PROFIT_MARKET/STOP_MARKET cố định trên sàn ngay lúc vào lệnh làm lưới
+# an toàn (đặt thật khi có executor, dùng chung executor với kèo Đột Biến).
 MIDCROSS_RSI_PERIOD          = 6      # Chu kỳ RSI
-MIDCROSS_RSI_LONG_ENTRY      = 55     # RSI cắt LÊN qua mốc này -> xác nhận LONG
-MIDCROSS_RSI_SHORT_ENTRY     = 45     # RSI cắt XUỐNG qua mốc này -> xác nhận SHORT
+MIDCROSS_RSI_OVERSOLD        = 20     # LONG: nến ĐẦU TIÊN đóng cửa đẩy RSI xuống DƯỚI mốc này
+MIDCROSS_RSI_OVERBOUGHT      = 80     # SHORT: nến ĐẦU TIÊN đóng cửa đẩy RSI lên TRÊN mốc này
 MIDCROSS_TP_PCT              = 0.015  # Chốt lời cố định 1.5%
-MIDCROSS_SL_PCT              = 0.01   # Cắt lỗ cố định 1%
-MIDCROSS_VOL_MULT            = 1.5    # Volume nến xuyên biên giữa phải >= 1.5 lần nến sát trước
+MIDCROSS_SL_PCT              = 0.01   # Cắt lỗ cố định 1% (lưới an toàn trên sàn — xem thêm SL sớm theo RSI)
+MIDCROSS_VOL_MULT            = 2.0    # Volume nến tín hiệu tối thiểu gấp 2 lần nến sát trước (không giới hạn trên)
+MIDCROSS_BODY_MIN_RATIO      = 0.70   # Thân nến tín hiệu tối thiểu 70% biên độ nến (high-low) — "thân mập"
+MIDCROSS_WICK_MAX_RATIO      = 0.15   # Mỗi râu (trên & dưới) tối đa 15% biên độ nến — "ít râu"
 MIDCROSS_RISK_USD            = 2.0    # Rủi ro CỐ ĐỊNH mỗi lệnh (USDT) — riêng cho kèo này (khác Spike)
-MIDCROSS_ZONE_LOOKBACK = 3             # Số nến gần nhất TRƯỚC nến xuyên biên giữa — cả 3 nến này phải
-                                        # nằm hẳn về 1 phía của BB giữa (vùng dưới hoặc vùng trên), KHÔNG
-                                        # cần chạm tới BB trên/dưới, chỉ cần "đi từ vùng đó lên/xuống"
 
 WS_MAX_STREAMS_PER_CONN = 190   # Giới hạn an toàn số stream / 1 kết nối WebSocket (Binance giới hạn ~200)
 WS_RECONNECT_DELAY_SEC  = 5     # Chờ trước khi kết nối lại sau khi WebSocket bị rớt
@@ -185,6 +188,9 @@ class Position:
     opened_at: datetime
     entry_bar_open: int | None = None   # bar_open của nến lúc tín hiệu phát ra (chỉ Spike dùng) —
                                           # để tránh tính TP/SL lùi về biên độ đã có TRƯỚC lúc vào lệnh
+    invalidation_checked: bool = False  # (chỉ kèo BB RSI H1 dùng) đã xét SL SỚM theo RSI trên nến
+                                          # kế tiếp ngay sau khi vào lệnh chưa — xem
+                                          # MidCrossScanner._check_position
 
 
 def _position_hit(pos: Position, candle: dict) -> Literal["TP", "SL"] | None:
@@ -396,66 +402,59 @@ def detect_spike_signal(symbol: str, closed_candles: list[dict], live_candle: di
 
 def detect_midcross_signal(symbol: str, candles: list[dict],
                             direction: Literal["LONG", "SHORT"] = "LONG") -> Signal | None:
-    """Kèo MỚI — BB biên giữa + RSI6 (H1). Các điều kiện trên nến VỪA đóng cửa (curr):
-    1) Giá "đi từ vùng dưới/trên" — cả MIDCROSS_ZONE_LOOKBACK nến gần nhất TRƯỚC curr đều đóng
-       cửa nằm hẳn 1 phía của BB GIỮA (vùng dưới hoặc vùng trên) — KHÔNG cần chạm tới BB
-       trên/dưới, chỉ cần đang ở về phía đó — rồi curr bật lên/xuống xuyên qua BB GIỮA.
-    2) curr phải là nến TĂNG (LONG) / GIẢM (SHORT) đúng chiều xuyên biên giữa, và KHÔNG được
-       chạm/thủng biên đối diện (LONG: high chưa tới BB trên; SHORT: low chưa tới BB dưới) —
-       tránh nhận nến đã xuyên quá xa (rủi ro bật ngược ngay từ biên đối diện, xem thực tế
-       AAPLUSDT 10/08/2026).
-    3) RSI(6) cắt qua mốc 55 (LONG) / 45 (SHORT) đúng trên curr.
-    4) Volume curr >= MIDCROSS_VOL_MULT lần volume nến sát trước (prev)."""
-    needed = BB_PERIOD + MIDCROSS_ZONE_LOOKBACK + MIDCROSS_RSI_PERIOD + 2
+    """Kèo BB RSI H1 — nến "xả/climax" cực trị RSI(6) trên nến VỪA đóng cửa (curr):
+    1) "Đầu tiên": RSI nến TRƯỚC (prev) CHƯA vượt ngưỡng, RSI của curr mới cắt qua —
+       LONG: prev_rsi >= 20 và curr_rsi < 20 (RSI vừa tụt xuống dưới 20).
+       SHORT: prev_rsi <= 80 và curr_rsi > 80 (RSI vừa vọt lên trên 80).
+       Chỉ báo ĐÚNG lúc RSI mới cắt ngưỡng, không báo lặp lại ở các nến sau đó vẫn còn cực trị.
+    2) Đúng chiều nến: LONG cần curr là nến GIẢM/đỏ (bắt đáy lúc giá đang rơi mạnh); SHORT cần
+       curr là nến TĂNG/xanh (bán đỉnh lúc giá đang vọt mạnh).
+    3) "Thân mập ít râu": thân nến (|close-open|) >= MIDCROSS_BODY_MIN_RATIO biên độ nến
+       (high-low), mỗi râu trên/dưới <= MIDCROSS_WICK_MAX_RATIO biên độ nến.
+    4) Volume curr >= MIDCROSS_VOL_MULT lần volume nến sát trước (prev), không giới hạn trên."""
+    needed = MIDCROSS_RSI_PERIOD + 2
     if len(candles) < needed:
         return None
 
     curr = candles[-1]
     prev = candles[-2]
-    if curr["volume"] < MIDCROSS_VOL_MULT * prev["volume"]:
-        return None   # Điều kiện 3: volume nến xuyên biên giữa
 
-    # BB tính đến TRƯỚC curr (tránh self-reference) — dùng để xét prev/lookback nằm ở vùng
-    # dưới hay trên BB giữa.
-    ind_prev = compute_indicators(candles[:-1])
-    if ind_prev["bb_middle"] == 0.0:
+    rng = curr["high"] - curr["low"]
+    if rng <= 0:
         return None
-    # BB tính ĐẾN curr — dùng để xét chính curr đã xuyên qua biên giữa hay chưa.
-    ind_curr = compute_indicators(candles)
-    if ind_curr["bb_middle"] == 0.0:
-        return None
+
+    body = abs(curr["close"] - curr["open"])
+    if body < MIDCROSS_BODY_MIN_RATIO * rng:
+        return None   # Điều kiện 3: thân chưa đủ mập
+
+    upper_wick = curr["high"] - max(curr["open"], curr["close"])
+    lower_wick = min(curr["open"], curr["close"]) - curr["low"]
+    if upper_wick > MIDCROSS_WICK_MAX_RATIO * rng or lower_wick > MIDCROSS_WICK_MAX_RATIO * rng:
+        return None   # Điều kiện 3: râu quá dài
+
+    if prev["volume"] <= 0 or curr["volume"] < MIDCROSS_VOL_MULT * prev["volume"]:
+        return None   # Điều kiện 4: volume chưa đạt tối thiểu
 
     closes = [c["close"] for c in candles]
     rsi_series = _calc_rsi(closes, MIDCROSS_RSI_PERIOD)
     prev_rsi, curr_rsi = rsi_series[-2], rsi_series[-1]
 
-    lookback = candles[-1 - MIDCROSS_ZONE_LOOKBACK : -1]   # N nến trước curr (không gồm curr)
-
     if direction == "LONG":
-        if not all(c["close"] <= ind_prev["bb_middle"] for c in lookback):
-            return None   # Điều kiện 1: chưa "đi từ vùng dưới" (còn nến nào vượt lên vùng trên)
-        if not (prev["close"] <= ind_prev["bb_middle"] and curr["close"] > ind_curr["bb_middle"]):
-            return None   # Điều kiện 2: chưa đâm xuyên biên giữa (từ dưới lên)
-        if not (curr["close"] > curr["open"]):
-            return None   # Điều kiện 2b: curr phải là nến TĂNG (xanh)
-        if curr["high"] >= ind_curr["bb_upper"]:
-            return None   # Điều kiện 2c: không được chạm/thủng biên trên (xuyên quá xa)
-        if not (prev_rsi < MIDCROSS_RSI_LONG_ENTRY <= curr_rsi):
-            return None   # Điều kiện 3 (RSI): chưa cắt LÊN qua 55
-    else:
-        if not all(c["close"] >= ind_prev["bb_middle"] for c in lookback):
-            return None   # Điều kiện 1: chưa "đi từ vùng trên" (còn nến nào tụt xuống vùng dưới)
-        if not (prev["close"] >= ind_prev["bb_middle"] and curr["close"] < ind_curr["bb_middle"]):
-            return None   # Điều kiện 2: chưa đâm xuyên biên giữa (từ trên xuống)
         if not (curr["close"] < curr["open"]):
-            return None   # Điều kiện 2b: curr phải là nến GIẢM (đỏ)
-        if curr["low"] <= ind_curr["bb_lower"]:
-            return None   # Điều kiện 2c: không được chạm/thủng biên dưới (xuyên quá xa)
-        if not (prev_rsi > MIDCROSS_RSI_SHORT_ENTRY >= curr_rsi):
-            return None   # Điều kiện 3 (RSI): chưa cắt XUỐNG qua 45
+            return None   # Điều kiện 2: curr phải là nến GIẢM (đỏ)
+        if not (prev_rsi >= MIDCROSS_RSI_OVERSOLD > curr_rsi):
+            return None   # Điều kiện 1: chưa phải nến ĐẦU TIÊN đóng dưới RSI 20
+    else:
+        if not (curr["close"] > curr["open"]):
+            return None   # Điều kiện 2: curr phải là nến TĂNG (xanh)
+        if not (prev_rsi <= MIDCROSS_RSI_OVERBOUGHT < curr_rsi):
+            return None   # Điều kiện 1: chưa phải nến ĐẦU TIÊN đóng trên RSI 80
 
-    logger.info(f"{symbol} {direction} (midcross) | Entry={curr['close']:.4f} RSI={curr_rsi:.1f}")
-    return Signal(symbol=symbol, direction=direction, price=curr["close"], sl=0.0, ind=ind_curr)
+    # BB không còn là điều kiện vào lệnh — chỉ tính để giữ Signal.ind (hiển thị/log nếu cần).
+    ind = compute_indicators(candles)
+    logger.info(f"{symbol} {direction} (midcross) | Entry={curr['close']:.4f} RSI={curr_rsi:.1f} "
+                f"Vol={curr['volume']:.0f} (nến trước={prev['volume']:.0f})")
+    return Signal(symbol=symbol, direction=direction, price=curr["close"], sl=0.0, ind=ind)
 
 # ═══════════════════════════════════════════════
 #  TELEGRAM
@@ -522,23 +521,23 @@ def _build_spike_message(signal: Signal, interval_display: str, tp: float) -> st
 
 
 def _build_midcross_message(signal: Signal, interval_display: str, tp: float) -> str:
-    is_short = signal.direction == "SHORT"
-    emoji    = "🔴" if is_short else "🟢"
-    zone     = "trên" if is_short else "dưới"
-    candle_dir = "cây nến giảm" if is_short else "cây nến tăng"
-    opposite_band = "biên dưới" if is_short else "biên trên"
-    entry_rsi = MIDCROSS_RSI_SHORT_ENTRY if is_short else MIDCROSS_RSI_LONG_ENTRY
+    is_short   = signal.direction == "SHORT"
+    emoji      = "🔴" if is_short else "🟢"
+    candle_dir = "cây nến tăng (xanh)" if is_short else "cây nến giảm (đỏ)"
+    rsi_level  = MIDCROSS_RSI_OVERBOUGHT if is_short else MIDCROSS_RSI_OVERSOLD
+    rsi_desc   = f"lên TRÊN {rsi_level}" if is_short else f"xuống DƯỚI {rsi_level}"
     return (
         f"*{emoji} {signal.direction} SIGNAL - {interval_display}*\n\n"
         f"Coin: `{signal.symbol}`\n\n"
         f"Điều kiện:\n"
-        f"✓ Giá đi từ vùng {zone} xuyên qua BB giữa\n"
-        f"✓ Là {candle_dir}, chưa chạm/thủng {opposite_band}\n"
-        f"✓ RSI(6) cắt qua mốc {entry_rsi}\n"
-        f"✓ Volume nến xuyên biên giữa ≥ {MIDCROSS_VOL_MULT}x nến trước\n\n"
+        f"✓ Nến ĐẦU TIÊN đóng cửa đẩy RSI(6) {rsi_desc}\n"
+        f"✓ Là {candle_dir}, thân ≥ {MIDCROSS_BODY_MIN_RATIO*100:.0f}% biên độ, "
+        f"mỗi râu ≤ {MIDCROSS_WICK_MAX_RATIO*100:.0f}%\n"
+        f"✓ Volume ≥ {MIDCROSS_VOL_MULT:.0f}x nến trước\n\n"
         f"Entry: `{_fmt(signal.price)}`\n"
         f"TP: `{_fmt(tp)}` (chốt lời {MIDCROSS_TP_PCT*100:.1f}%)\n"
-        f"SL: `{_fmt(signal.sl)}` (cắt lỗ {MIDCROSS_SL_PCT*100:.1f}%)"
+        f"SL: `{_fmt(signal.sl)}` (cắt lỗ {MIDCROSS_SL_PCT*100:.1f}%, hoặc SL sớm nếu nến kế "
+        f"tiếp vẫn đóng ngoài vùng RSI cực trị)"
     )
 
 
@@ -1028,14 +1027,17 @@ class SpikeScanner:
 
 
 class MidCrossScanner:
-    """Kèo BB RSI H1 — BB biên giữa + RSI6. CÓ tự đặt lệnh thật khi có executor (dùng chung
-    executor/tài khoản với kèo Đột Biến) — xem detect_midcross_signal() cho điều kiện vào lệnh.
+    """Kèo BB RSI H1 — nến climax cực trị RSI(6). CÓ tự đặt lệnh thật khi có executor (dùng
+    chung executor/tài khoản với kèo Đột Biến) — xem detect_midcross_signal() cho điều kiện
+    vào lệnh.
 
-    RSI(6) CHỈ dùng để lọc điều kiện VÀO lệnh. TP/SL đều là mốc giá CỐ ĐỊNH như các kèo khác
-    (+MIDCROSS_TP_PCT / -MIDCROSS_SL_PCT), đặt thật bằng TAKE_PROFIT_MARKET/STOP_MARKET trên
-    sàn khi có executor — dùng chung Position + _position_hit() với các kèo dùng Scanner, và
-    xét cả trên nến đã đóng lẫn live tick (giống Scanner/SpikeScanner) vì giờ không còn phụ
-    thuộc RSI lúc thoát lệnh nữa."""
+    TP/SL chính vẫn là mốc giá CỐ ĐỊNH như các kèo khác (+MIDCROSS_TP_PCT / -MIDCROSS_SL_PCT),
+    đặt thật bằng TAKE_PROFIT_MARKET/STOP_MARKET trên sàn khi có executor ngay lúc vào lệnh —
+    dùng chung Position + _position_hit() với các kèo dùng Scanner, xét cả trên nến đã đóng lẫn
+    live tick (giống Scanner/SpikeScanner). NGOÀI RA có thêm 1 lớp SL SỚM riêng của kèo này:
+    nếu nến ĐÓNG CỬA ngay sau khi vào lệnh vẫn còn RSI ở vùng cực trị (>=80 Short / <=20 Long)
+    thì chủ động đóng sớm bằng lệnh MARKET (executor.close_position_market) thay vì chờ chạm
+    SL giá cố định — xem _check_position()."""
 
     def __init__(self, symbols: list[str], chat_id: str,
                  daily_stats: "DailyStats | None" = None, executor=None) -> None:
@@ -1053,11 +1055,35 @@ class MidCrossScanner:
         remaining = timedelta(minutes=ALERT_COOLDOWN_MINUTES) - (datetime.now() - last)
         return max(0, int(remaining.total_seconds()))
 
-    async def _check_position(self, symbol: str, candle: dict) -> None:
+    async def _check_position(self, symbol: str, candle: dict,
+                               closed_candles: list[dict] | None = None) -> None:
+        """closed_candles: CHỈ truyền (đầy đủ, candle chính là closed_candles[-1]) khi gọi từ
+        on_closed_candle (nến ĐÃ đóng) — dùng để xét SL SỚM theo RSI, đúng 1 LẦN trên nến kế
+        tiếp ngay sau khi vào lệnh: nếu RSI vẫn ở vùng cực trị (chưa đảo chiều) thì huỷ lệnh
+        sớm bằng MARKET thay vì chờ chạm SL giá cố định. Truyền None khi gọi từ on_live_tick
+        (nến đang hình thành, RSI chưa ổn định — không xét SL sớm lúc này)."""
         pos = self._positions.get(symbol)
         if pos is None:
             return
         hit = _position_hit(pos, candle)
+
+        if hit is None and closed_candles is not None and not pos.invalidation_checked:
+            pos.invalidation_checked = True   # chỉ xét đúng 1 lần trên nến kế tiếp ngay sau khi vào lệnh
+            curr_rsi = _calc_rsi([c["close"] for c in closed_candles], MIDCROSS_RSI_PERIOD)[-1]
+            still_extreme = (
+                curr_rsi <= MIDCROSS_RSI_OVERSOLD if pos.direction == "LONG"
+                else curr_rsi >= MIDCROSS_RSI_OVERBOUGHT
+            )
+            if still_extreme:
+                hit = "SL"
+                logger.info(f"[MIDCROSS] {symbol} {pos.direction}: SL SỚM — nến kế tiếp vẫn "
+                            f"đóng ngoài vùng RSI cực trị (RSI={curr_rsi:.1f})")
+                if self.executor is not None:
+                    # Không có STOP_MARKET nào trên sàn khớp theo điều kiện này -> phải chủ
+                    # động đóng bằng lệnh MARKET; executor tự báo Telegram + tính PnL thật.
+                    asyncio.create_task(self.executor.close_position_market(
+                        symbol, reason="RSI vẫn ở vùng cực trị nến kế tiếp"))
+
         if hit is None:
             return
 
@@ -1078,7 +1104,7 @@ class MidCrossScanner:
         if symbol not in self.symbols:
             return
 
-        await self._check_position(symbol, candles[-1])
+        await self._check_position(symbol, candles[-1], closed_candles=candles)
         if symbol in self._positions:
             return   # Lệnh của coin này vẫn đang mở, chưa tìm tín hiệu mới
 
