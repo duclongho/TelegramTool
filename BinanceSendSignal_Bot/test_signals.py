@@ -223,53 +223,8 @@ for i in range(200):
     ok = (result is not None) if valid else (result is None)
     check(CATEGORY, i, ok, f"valid={valid} violate={violate} result={result is not None}")
 
-# ═══════════════════════════════════════════════
-#  4) detect_spike_signal SHORT + LONG  -> 50+50 valid, 50+50 invalid
-# ═══════════════════════════════════════════════
-for direction, CATEGORY in (("SHORT", "spike-SHORT"), ("LONG", "spike-LONG")):
-    for i in range(100):
-        base = make_base(bot.BB_PERIOD + bot.SPIKE_LOOKBACK + 5,
-                          start_price=random.uniform(1, 5000), step=random.uniform(-0.05, 0.05))
-        ind = bot.compute_indicators(base)
-        band = ind["bb_upper"] if direction == "SHORT" else ind["bb_lower"]
-        if band == 0.0:
-            continue
-
-        lookback = base[-bot.SPIKE_LOOKBACK:]
-        avg_range = sum(c["high"] - c["low"] for c in lookback) / bot.SPIKE_LOOKBACK
-        avg_vol = sum(c["volume"] for c in lookback) / bot.SPIKE_LOOKBACK
-
-        valid = i < 50
-        violate = None if valid else random.choice(["range", "volume", "pierce"])
-
-        range_mult = random.uniform(bot.SPIKE_RANGE_MULT + 0.5, bot.SPIKE_RANGE_MULT * 2.5)
-        vol_mult = random.uniform(bot.SPIKE_VOL_MULT + 0.5, bot.SPIKE_VOL_MULT * 2.5)
-        pierce_margin = random.uniform(0.05, 2.0)   # xuyen qua band bao nhieu
-
-        if violate == "range":
-            range_mult = random.uniform(0.5, bot.SPIKE_RANGE_MULT - 0.5)
-        if violate == "volume":
-            vol_mult = random.uniform(0.5, bot.SPIKE_VOL_MULT - 0.5)
-        if violate == "pierce":
-            pierce_margin = -random.uniform(0.1, 3.0)   # khong xuyen qua band
-
-        live_range = range_mult * avg_range if avg_range > 0 else random.uniform(1, 5)
-        live_vol = vol_mult * avg_vol if avg_vol > 0 else random.uniform(500, 2000)
-
-        if direction == "SHORT":
-            high = band + pierce_margin
-            low = high - live_range
-        else:
-            low = band - pierce_margin
-            high = low + live_range
-
-        open_ = (high + low) / 2
-        close = open_
-        live_candle = mk(open_, high, low, close, live_vol)
-
-        result = bot.detect_spike_signal("TEST", base, live_candle, direction=direction)
-        ok = (result is not None) if valid else (result is None)
-        check(CATEGORY, i, ok, f"valid={valid} violate={violate} result={result is not None}")
+# 4) detect_spike_signal — kèo BB H1 Đột Biến đã bị XÓA khỏi bot (cùng executor.py), hàm này
+#    không còn tồn tại trong longH4Future.py -> bỏ luôn phần test tương ứng.
 
 # ═══════════════════════════════════════════════
 #  5) _position_hit  -> 100 case (TP/SL/ca hai/khong gi, ca LONG+SHORT)
@@ -397,14 +352,12 @@ try:
         candles = [mk(float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])) for k in data]
 
         # Chay tat ca detector qua tung cua so truot - chi kiem tra KHONG crash
-        for end in range(bot.BB_PERIOD + bot.SPIKE_LOOKBACK + 2, len(candles)):
+        # (detect_legacy_signal/detect_spike_signal da bi xoa khoi bot -> bo khoi day)
+        for end in range(bot.BB_PERIOD + 2, len(candles)):
             window = candles[:end]
             try:
                 bot.detect_signal(sym, window, direction="LONG")
                 bot.detect_signal(sym, window, direction="SHORT")
-                bot.detect_legacy_signal(sym, window)
-                bot.detect_spike_signal(sym, window[:-1], window[-1], direction="LONG")
-                bot.detect_spike_signal(sym, window[:-1], window[-1], direction="SHORT")
                 real_data_tested += 1
             except Exception as e:
                 check(CATEGORY, real_data_tested, False, f"{sym} idx={end} lỗi: {e}")
