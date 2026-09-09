@@ -5,3 +5,4 @@ __pycache__/
 # Runtime state của bot (VPS) — không phải source code
 BinanceSendSignal_Bot/executor_positions_state.json
 BinanceSendSignal_Bot/EXECUTOR_STOP
+BinanceSendSignal_Bot/channel_scanner_state.json
