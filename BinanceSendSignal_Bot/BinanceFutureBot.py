@@ -1,92 +1,102 @@
-#!/usr/bin/env python3
-"""
-Binance Futures Song Kiem Signal Bot
-Chỉnh TELEGRAM_TOKEN, TELEGRAM_CHAT_ID trước khi chạy.
-"""
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
+import math
 import os
+import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Awaitable, Callable, Literal, TypedDict
+from urllib.parse import urlencode
 
 import aiohttp
 
-# ═══════════════════════════════════════════════
-#  CẤU HÌNH — chỉnh ở đây
-# ═══════════════════════════════════════════════
-TELEGRAM_TOKEN         = "8641278115:AAEB08VXrX5YJl_2zzM_SFF4JRdEwIfAj-s"   # Token bot Telegram
-TELEGRAM_CHAT_ID       = "-1004448248877"   # Chat ID nhận kèo BB H1 Rút Râu (LONG SIGNAL (H1) + SHORT SIGNAL (H1))
-TELEGRAM_CHAT_ID_H1    = "-1004340326145"   # Chat ID nhận kèo RSI H4 Đảo Biên (LONG/SHORT SIGNAL H4, intrabar)
+TELEGRAM_TOKEN         = "8641278115:AAEB08VXrX5YJl_2zzM_SFF4JRdEwIfAj-s"
+TELEGRAM_CHAT_ID       = "-1004448248877"
+TELEGRAM_CHAT_ID_H1    = "-1004340326145"
+TELEGRAM_CHAT_ID_PIVOT = "-1004479723244"
 
-# Tên gọi CHÍNH THỨC của các kèo — dùng thống nhất trong tin nhắn Telegram + thống kê cuối ngày.
-# (Kèo BB H1 Đột Biến và BB RSI H1 — 2 kèo AUTO-TRADE tiền thật qua executor.py — đã bị XÓA
-# khỏi bot, cùng với executor.py, theo yêu cầu chỉ giữ lại các kèo tín hiệu bên dưới. Kèo Kênh
-# Song Song 3 Điểm cũng đã bị XÓA hẳn khỏi bot theo yêu cầu — file Pine kenh_song_song_indicator.pine
-# vẫn còn giữ lại để xem thủ công trên TradingView, không còn liên kết gì với bot nữa.)
-KEO_RUTRAU_NAME   = "BB H1 Rút Râu"          # <-> TELEGRAM_CHAT_ID       (nến rút râu chạm BB trên/dưới)
-KEO_LEGACY_NAME   = "RSI H4 Đảo Biên"        # <-> TELEGRAM_CHAT_ID_H1    (RSI6 vượt rồi quay đầu qua mốc 70/90, intrabar)
+KEO_RUTRAU_NAME   = "BB H1 Rút Râu"
+KEO_LEGACY_NAME   = "RSI H4 Đảo Biên"
+KEO_PIVOT_NAME    = "Pivot DCA Đảo Chiều"
 
-AUTO_TOP_SYMBOLS  = True   # True = tự động lấy top coin theo khối lượng
-TOP_SYMBOLS_COUNT = 200     # Số lượng coin theo dõi (LONG-H1 + SHORT-H1 mới)
-LEGACY_TOP_SYMBOLS_COUNT = 150   # Số lượng coin theo dõi riêng cho kèo RSI H4 Đảo Biên (feed H4 riêng)
+AUTO_TOP_SYMBOLS  = True
+TOP_SYMBOLS_COUNT = 200
+LEGACY_TOP_SYMBOLS_COUNT = 150
 
-SYMBOLS = [                # Dùng khi AUTO_TOP_SYMBOLS = False
+SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
     "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
 ]
 
+PIVOT_SYMBOLS_M5 = [
+    "XAUUSDT",
+]
+PIVOT_SYMBOLS_M15 = [
+    "BNBUSDT",
+    "ETHUSDT",
+    "BTCUSDT",
+]
+PIVOT_SYMBOLS = PIVOT_SYMBOLS_M5 + PIVOT_SYMBOLS_M15
+
 CANDLE_BUFFER = 150
 
-INTERVAL_H1         = "1h"   # Timeframe dùng chung cho hầu hết các kèo
+INTERVAL_H1         = "1h"
 INTERVAL_H1_DISPLAY = "H1"
 
-INTERVAL_H4         = "4h"   # Timeframe riêng cho kèo RSI H4 Đảo Biên (feed WebSocket riêng)
+INTERVAL_H4         = "4h"
 INTERVAL_H4_DISPLAY = "H4"
+
+INTERVAL_M15         = "15m"
+INTERVAL_M15_DISPLAY = "M15"
+
+INTERVAL_M5          = "5m"
+INTERVAL_M5_DISPLAY  = "M5"
 
 BB_PERIOD = 20
 BB_STD    = 2.0
 
-DOJI_BODY_MAX_RATIO       = 0.3   # Thân nến tối đa 30% tổng biên độ nến (high-low) — coi là nến doji
-DOJI_SHORT_WICK_MAX_RATIO = 0.1   # Râu phía đối diện hướng đảo chiều tối đa 10% tổng biên độ (gần như không có)
-BAND_CROSS_MIN_RATIO      = 0.1   # Phần xuyên qua BB trên/dưới tối thiểu 10% tổng biên độ nến
+DOJI_BODY_MAX_RATIO       = 0.3
+DOJI_SHORT_WICK_MAX_RATIO = 0.1
+BAND_CROSS_MIN_RATIO      = 0.1
 
-MIN_CANDLES_FOR_SIGNAL = BB_PERIOD + 5  # Số nến tối thiểu cần có trước khi bắt đầu xét tín hiệu
+MIN_CANDLES_FOR_SIGNAL = BB_PERIOD + 5
 
-ALERT_COOLDOWN_MINUTES        = 30    # Cooldown giữa 2 tín hiệu cùng coin/chiều
-                                     # (Kèo RSI H4 Đảo Biên KHÔNG dùng hằng số này — giới hạn
-                                     # riêng theo NGÀY, xem RsiExtremeScanner._already_fired_today.)
+ALERT_COOLDOWN_MINUTES        = 30
 
-DOJI_TP_PCT = 0.02     # Chốt lời cố định 2% (kèo BB H1 Rút Râu)
-DOJI_SL_PCT = 0.015    # Cắt lỗ cố định 1.5% (kèo BB H1 Rút Râu)
+DOJI_TP_PCT = 0.02
+DOJI_SL_PCT = 0.015
 
-# Kèo RSI H4 Đảo Biên — INTRABAR (không chờ đóng nến, theo dõi RSI6 liên tục trong cây H4
-# đang hình thành): SHORT khi RSI đã vượt LÊN trên 90 (armed) rồi quay lại lùi xuống tới 75
-# (đảo chiều từ quá mua); LONG khi RSI đã vượt XUỐNG dưới 70 (armed) rồi quay lại tăng lên tới
-# 75 (đảo chiều từ quá bán). Mốc armed (90/70) và mốc xác nhận bắn (75/75) TÁCH RIÊNG — dùng
-# khoảng đệm RSI để lọc bớt tín hiệu nhiễu khi RSI chỉ vừa chớm qua lại sát biên. Trạng
-# thái armed chỉ tính TRONG PHẠM VI 1 cây H4 đang chạy — tự reset mỗi khi có nến H4 mới mở,
-# không cộng dồn qua nhiều cây. Chỉ báo Telegram, KHÔNG tự đặt lệnh thật (không dùng executor)
-# — xem RsiExtremeScanner.
-LEGACY_RSI_PERIOD       = 6      # Chu kỳ RSI (đồng bộ với kèo BB RSI H1)
-LEGACY_RSI_OVERBOUGHT   = 90     # SHORT: RSI vượt lên trên mốc này thì armed
-LEGACY_RSI_SHORT_CONFIRM = 75    # SHORT: armed rồi RSI lùi về tới mốc này (<=) thì bắn
-LEGACY_RSI_OVERSOLD     = 70     # LONG: RSI đang Ở DƯỚI mốc này (bất kỳ lúc nào, không phải sự
-                                   # kiện xuyên ngưỡng) thì armed
-LEGACY_RSI_LONG_CONFIRM = 75     # LONG: armed rồi RSI đi lên tới mốc này (>=) thì bắn (buy)
-LEGACY_TP_PCT = 0.03    # Chốt lời cố định 3% (kèo RSI H4 Đảo Biên)
-LEGACY_SL_PCT = 0.03    # Cắt lỗ cố định 3% (kèo RSI H4 Đảo Biên)
+LEGACY_RSI_PERIOD       = 6
+LEGACY_RSI_OVERBOUGHT   = 90
+LEGACY_RSI_SHORT_CONFIRM = 75
+LEGACY_RSI_OVERSOLD     = 70
+LEGACY_RSI_LONG_CONFIRM = 75
+LEGACY_TP_PCT = 0.03
+LEGACY_SL_PCT = 0.03
 
-WS_MAX_STREAMS_PER_CONN = 190   # Giới hạn an toàn số stream / 1 kết nối WebSocket (Binance giới hạn ~200)
-WS_RECONNECT_DELAY_SEC  = 5     # Chờ trước khi kết nối lại sau khi WebSocket bị rớt
-WS_HEARTBEAT_MINUTES    = 60    # Log xác nhận vẫn đang kết nối Binance mỗi N phút
-WS_NO_DATA_TIMEOUT_SEC  = 60    # Nếu không nhận được bất kỳ message nào trong N giây -> coi là treo, kết nối lại
+PIVOT_LENGTH  = 50
+PIVOT_MAX_DCA = 2
+PIVOT_CANDLE_BUFFER = 500
 
-# ═══════════════════════════════════════════════
-#  LOGGING
-# ═══════════════════════════════════════════════
+PIVOT_LIVE_TRADING  = True
+BINANCE_API_KEY     = "FPaPRx6ECzzQ25RgVqjozp3qsFMrc5u3vQScdfecy7oZUEs7UKUcdjdixtb03uNI"
+BINANCE_API_SECRET  = "t7MqGdFRTAyVLmRhzRn7o3ixHEU83YnJzqsQUsPpxfkiktqsOQ7crQSisCqM6FYw"
+PIVOT_LEVERAGE      = 50
+PIVOT_MARGIN_TYPE   = "CROSSED"
+PIVOT_ACCOUNT_PCT   = 0.05
+PIVOT_FIXED_MARGIN_USDT = {
+    "XAUUSDT": 5.0,
+}
+
+WS_MAX_STREAMS_PER_CONN = 190
+WS_RECONNECT_DELAY_SEC  = 5
+WS_HEARTBEAT_MINUTES    = 60
+WS_NO_DATA_TIMEOUT_SEC  = 60
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -94,9 +104,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ═══════════════════════════════════════════════
-#  INDICATORS
-# ═══════════════════════════════════════════════
 class Indicators(TypedDict):
     bb_upper:  float
     bb_middle: float
@@ -108,7 +115,7 @@ def _calc_bb(closes: list[float], period: int, multiplier: float) -> tuple[float
         return 0.0, 0.0, 0.0
     window   = closes[-period:]
     middle   = sum(window) / period
-    variance = sum((x - middle) ** 2 for x in window) / period  # population std
+    variance = sum((x - middle) ** 2 for x in window) / period
     std      = variance ** 0.5
     return middle + multiplier * std, middle, middle - multiplier * std
 
@@ -120,9 +127,6 @@ def compute_indicators(candles: list[dict]) -> Indicators:
 
 
 def _calc_rsi(closes: list[float], period: int) -> list[float]:
-    """RSI kiểu Wilder (smoothing), trả về 1 list RSI cùng độ dài với closes (các vị trí chưa đủ
-    dữ liệu = 50.0 — trung tính). Dùng để lấy 2 giá trị gần nhất (trước/hiện tại) phát hiện CẮT
-    NGƯỠNG, giống cách BB dùng cho phát hiện xuyên biên."""
     n = len(closes)
     if n < period + 1:
         return [50.0] * n
@@ -148,21 +152,12 @@ def _calc_rsi(closes: list[float], period: int) -> list[float]:
 
 
 class SwingPoint(TypedDict):
-    bar_open: int      # mốc mở nến (ms) của điểm xoay — dùng làm trục thời gian TUYỆT ĐỐI
-                         # thay vì vị trí trong list (list là 1 deque maxlen=CANDLE_BUFFER, vị
-                         # trí phần tử SẼ đổi theo thời gian khi nến cũ bị đẩy ra -> không thể
-                         # dùng index làm trục ổn định cho phương trình đường thẳng lâu dài).
-    price:    float     # giá cao/thấp tại điểm xoay
-    type:     Literal["H", "L"]   # "H" = đỉnh (swing high), "L" = đáy (swing low)
+    bar_open: int
+    price:    float
+    type:     Literal["H", "L"]
 
 
 def _find_swing_points(candles: list[dict], k: int, count: int = 3) -> list[SwingPoint] | None:
-    """Quét TOÀN BỘ candles theo kiểu zigzag, giữ lại chuỗi đỉnh/đáy XEN KẼ NGHIÊM NGẶT — nếu
-    gặp 1 đỉnh mới CAO HƠN đỉnh đang giữ (chưa có đáy nào xen giữa) thì THAY THẾ đỉnh cũ (đỉnh
-    cũ chỉ là điểm trung gian, không phải điểm xoay thật), tương tự cho đáy. Chỉ xét nến đã
-    XÁC NHẬN (còn đủ k nến ĐÃ ĐÓNG ở cả 2 bên — nến cuối cùng trong `candles` có thể vẫn đang
-    hình thành nên KHÔNG được coi là đã xác nhận). Trả về `count` điểm gần nhất (cũ -> mới),
-    None nếu chưa đủ dữ liệu/chưa đủ điểm xoay."""
     n = len(candles)
     last_confirmable = n - 1 - k
     if last_confirmable < k:
@@ -172,7 +167,7 @@ def _find_swing_points(candles: list[dict], k: int, count: int = 3) -> list[Swin
     for idx in range(k, last_confirmable + 1):
         bar_open = candles[idx].get("bar_open")
         if bar_open is None:
-            continue   # nến nạp từ REST lúc mới khởi động thiếu bar_open -> bỏ qua, an toàn
+            continue
         before = candles[idx - k:idx]
         after  = candles[idx + 1:idx + 1 + k]
         hi, lo = candles[idx]["high"], candles[idx]["low"]
@@ -180,8 +175,6 @@ def _find_swing_points(candles: list[dict], k: int, count: int = 3) -> list[Swin
         is_low  = all(lo < c["low"]  for c in before) and all(lo < c["low"]  for c in after)
         if not (is_high or is_low):
             continue
-        # Hiếm khi 1 nến vừa là đỉnh vừa là đáy cục bộ (biên độ rất lớn) -> ưu tiên đỉnh, đơn
-        # giản hoá (không ảnh hưởng nhiều vì đây là biến động bất thường, hiếm gặp).
         ptype = "H" if is_high else "L"
         price = hi if is_high else lo
         point: SwingPoint = {"bar_open": bar_open, "price": price, "type": ptype}
@@ -189,7 +182,7 @@ def _find_swing_points(candles: list[dict], k: int, count: int = 3) -> list[Swin
         if zigzag and zigzag[-1]["type"] == ptype:
             more_extreme = (price > zigzag[-1]["price"]) if ptype == "H" else (price < zigzag[-1]["price"])
             if more_extreme:
-                zigzag[-1] = point   # điểm cũ chỉ là trung gian, thay bằng điểm cực trị hơn
+                zigzag[-1] = point
         else:
             zigzag.append(point)
 
@@ -198,9 +191,6 @@ def _find_swing_points(candles: list[dict], k: int, count: int = 3) -> list[Swin
     return zigzag[-count:]
 
 
-# ═══════════════════════════════════════════════
-#  SIGNAL
-# ═══════════════════════════════════════════════
 @dataclass
 class Signal:
     symbol:    str
@@ -212,26 +202,16 @@ class Signal:
 
 @dataclass
 class Position:
-    """Lệnh đang mở, chờ chạm TP hoặc SL."""
     symbol:    str
     direction: Literal["LONG", "SHORT"]
     entry:     float
     tp:        float
     sl:        float
     opened_at: datetime
-    entry_bar_open: int | None = None   # bar_open của nến lúc tín hiệu phát ra (kèo RSI H4 Đảo Biên
-                                          # dùng) — để tránh tính TP/SL lùi về biên độ đã có TRƯỚC lúc
-                                          # vào lệnh (xem _position_hit)
+    entry_bar_open: int | None = None
 
 
 def _position_hit(pos: Position, candle: dict) -> Literal["TP", "SL"] | None:
-    """Kiểm tra 1 nến (đã đóng hoặc đang hình thành) có chạm TP/SL của lệnh đang mở không.
-
-    Nếu candle CHÍNH LÀ nến lúc tín hiệu vừa phát ra (entry_bar_open trùng bar_open của
-    nến) thì dùng giá ĐÓNG CỬA hiện tại thay vì cao/thấp của cả nến — vì nến đột biến vốn
-    đã có biên độ lớn TRƯỚC khi đủ điều kiện báo tín hiệu, dùng high/low cả nến sẽ tính
-    lùi luôn phần biến động đã xảy ra trước lúc vào lệnh (khiến TP/SL báo "chạm" gần như
-    ngay lập tức dù chưa có biến động mới nào sau khi vào lệnh)."""
     is_entry_bar = pos.entry_bar_open is not None and candle.get("bar_open") == pos.entry_bar_open
 
     if is_entry_bar:
@@ -253,17 +233,12 @@ def _position_hit(pos: Position, candle: dict) -> Literal["TP", "SL"] | None:
         return None
 
     if hit_tp and hit_sl:
-        # Cả 2 mốc bị chạm trong cùng 1 nến — ước lượng theo hướng nến để chọn mốc chạm trước
         bearish = candle["close"] <= candle["open"]
         return ("TP" if bearish else "SL") if pos.direction == "SHORT" else ("SL" if bearish else "TP")
     return "TP" if hit_tp else "SL"
 
 
 class DailyStats:
-    """Đếm tín hiệu/kết quả TRONG NGÀY cho 1 kèo — dùng CHUNG cho cả 2 Scanner chiều
-    Long/Short của cùng 1 kèo (vd long_scanner + short_scanner cùng ghi vào 1 DailyStats
-    "H1 mới"), vì đây là ước lượng theo nến (không phải PnL thật) nên chỉ đếm % thắng/thua,
-    không tính USDT."""
 
     def __init__(self, name: str, chat_id: str) -> None:
         self.name    = name
@@ -307,8 +282,8 @@ def detect_signal(symbol: str, candles: list[dict],
     if len(candles) < BB_PERIOD + 2:
         return None
 
-    prev = candles[-2]   # Nến ngay trước — dùng để so khối lượng
-    curr = candles[-1]   # Nến chuồn chuồn/bia mộ chạm band — báo tín hiệu ngay khi đóng cửa
+    prev = candles[-2]
+    curr = candles[-1]
 
     rng = curr["high"] - curr["low"]
     if rng <= 0:
@@ -316,20 +291,18 @@ def detect_signal(symbol: str, candles: list[dict],
 
     body = abs(curr["close"] - curr["open"])
     if body > DOJI_BODY_MAX_RATIO * rng:
-        return None   # Thân nến quá lớn, không phải doji
+        return None
 
     if curr["volume"] < 2 * prev["volume"]:
-        return None   # Khối lượng phải gấp đôi trở lên nến trước
+        return None
 
-    # BB tính đến trước nến hiện tại, tránh self-reference
     ind = compute_indicators(candles[:-1])
     if ind["bb_middle"] == 0.0:
         return None
 
     if direction == "LONG":
-        # Nến rút râu chuyển hẳn sang xanh: chạm/xuyên sâu BB dưới rồi bật lên đóng cửa xanh
         if not (curr["close"] > curr["open"]):
-            return None   # Đóng nến đỏ -> bỏ qua
+            return None
         upper_wick = curr["high"] - max(curr["open"], curr["close"])
         if upper_wick > DOJI_SHORT_WICK_MAX_RATIO * rng:
             return None
@@ -338,9 +311,8 @@ def detect_signal(symbol: str, candles: list[dict],
         if curr["high"] >= ind["bb_middle"]:
             return None
     else:
-        # Nến rút râu chuyển hẳn sang đỏ: chạm/xuyên sâu BB trên rồi rớt xuống đóng cửa đỏ
         if not (curr["close"] < curr["open"]):
-            return None   # Đóng nến xanh -> bỏ qua
+            return None
         lower_wick = min(curr["open"], curr["close"]) - curr["low"]
         if lower_wick > DOJI_SHORT_WICK_MAX_RATIO * rng:
             return None
@@ -353,17 +325,9 @@ def detect_signal(symbol: str, candles: list[dict],
     return Signal(symbol=symbol, direction=direction, price=curr["close"], sl=0.0, ind=ind)
 
 
-# detect_legacy_signal() (BB vượt biên, momentum) đã được thay bằng kèo RSI H4 Đảo Biên —
-# logic INTRABAR có trạng thái (armed/reset theo từng cây H4) nên nằm trực tiếp trong
-# RsiExtremeScanner thay vì 1 hàm detect_fn thuần tuý như các kèo khác — xem class đó.
 
 
-# detect_spike_signal() (kèo BB H1 Đột Biến) và detect_midcross_signal() (kèo BB RSI H1) đã bị
-# XÓA cùng với SpikeScanner/MidCrossScanner và executor.py — 2 kèo đó KHÔNG còn chạy trong bot.
 
-# ═══════════════════════════════════════════════
-#  TELEGRAM
-# ═══════════════════════════════════════════════
 def _fmt(price: float) -> str:
     if price >= 1000:
         return f"{price:,.2f}"
@@ -422,32 +386,16 @@ def _build_close_message(pos: Position, interval_display: str, hit: Literal["TP"
     )
 
 
-TELEGRAM_SEND_RETRIES     = 3     # Tổng số lần thử gửi 1 tin (1 lần đầu + 2 lần retry)
-TELEGRAM_SEND_RETRY_DELAY = 2.0   # Giây chờ giữa mỗi lần retry
+TELEGRAM_SEND_RETRIES     = 3
+TELEGRAM_SEND_RETRY_DELAY = 2.0
 
-# Cửa sổ chống gửi TRÙNG: nếu ĐÚNG y hệt (chat_id, text) vừa được gửi cách đây chưa tới
-# TELEGRAM_DEDUPE_WINDOW_SEC giây thì bỏ qua, không gửi lại — phòng trường hợp lần gửi
-# TRƯỚC bị timeout ở PHÍA CLIENT (không nhận được response kịp trong 10s) nhưng thực ra
-# Telegram ĐÃ nhận và gửi thành công, khiến lần retry sau đó gửi lại y nguyên -> trùng tin
-# (đã xảy ra thực tế: 2 tin SHORT SIGNAL giống hệt entry/TP/SL gửi cách nhau vài giây).
 TELEGRAM_DEDUPE_WINDOW_SEC = 180
-_recent_sends: dict[tuple[str, str], datetime] = {}   # (chat_id, text) -> lúc gửi gần nhất
+_recent_sends: dict[tuple[str, str], datetime] = {}
 
 
 async def _send_telegram_message(chat_id: str, text: str, tag: str) -> None:
-    """Gửi 1 tin Telegram, TỰ RETRY vài lần nếu lỗi mạng/API tạm thời — trước đây gửi lỗi là
-    mất tin VĨNH VIỄN (chỉ log, không ai biết), từng gây hiện tượng "có tin đóng lệnh (TP/SL)
-    nhưng KHÔNG có tin mở lệnh" dù lệnh thật vẫn mở/đóng đúng trên sàn (vd BSBUSDT: tin "Đã mở
-    LONG" gửi thất bại 1 lần thoáng qua, còn tin "Đóng ... TP" sau đó gửi lại thành công bình
-    thường nên vẫn thấy). KHÔNG retry nếu lỗi rõ ràng do payload sai (4xx do Markdown lỗi cú
-    pháp...) vì gửi lại y nguyên cũng sẽ lỗi y như vậy — chỉ retry lỗi mạng/timeout/5xx/429.
-
-    Trước khi gửi, kiểm tra dedupe (xem TELEGRAM_DEDUPE_WINDOW_SEC) — chặn gửi trùng y hệt nội
-    dung cho cùng 1 chat trong cửa sổ ngắn, kể cả khi gọi hàm này từ 2 nơi độc lập."""
     key = (chat_id, text)
     now = datetime.now()
-    # Dọn các mục đã hết hạn trước — tránh _recent_sends phình to vô hạn khi bot chạy 24/7
-    # (mỗi entry chỉ sống tối đa TELEGRAM_DEDUPE_WINDOW_SEC).
     for k in [k for k, t in _recent_sends.items() if (now - t).total_seconds() >= TELEGRAM_DEDUPE_WINDOW_SEC]:
         del _recent_sends[k]
 
@@ -472,8 +420,6 @@ async def _send_telegram_message(chat_id: str, text: str, tag: str) -> None:
                     body = await resp.text()
                     last_error = f"HTTP {resp.status}: {body}"
                     if 400 <= resp.status < 500 and resp.status != 429:
-                        # Lỗi phía payload (vd Markdown sai cú pháp, chat_id không hợp lệ) —
-                        # gửi lại y nguyên chắc chắn lỗi lại, dừng ngay, khỏi retry vô ích.
                         logger.error(f"[TG-{tag}] Lỗi {last_error} — không retry (lỗi payload)")
                         return
                     logger.warning(f"[TG-{tag}] Lỗi {last_error} (lần {attempt}/{TELEGRAM_SEND_RETRIES})")
@@ -504,16 +450,8 @@ async def send_close_alert(pos: Position, chat_id: str, interval_display: str, h
     await _send_telegram_message(chat_id, text, f"{interval_display}-{hit}")
 
 
-# ═══════════════════════════════════════════════
-#  LIVE FEED (WEBSOCKET)
-# ═══════════════════════════════════════════════
 _FUTURES_REST = "https://fapi.binance.com"
 _FUTURES_WS   = "wss://fstream.binance.com"
-# Binance đã đổi kiến trúc WebSocket Futures: các stream được phân theo path /public, /market,
-# /private (xem "Important WebSocket Change Notice"). Kline/kline_* thuộc nhóm /market — kết nối
-# theo URL cũ (không có path) sau mốc chuyển đổi chỉ còn nhận được dữ liệu /public (vd: depth),
-# KHÔNG còn nhận kline nữa (im lặng, không báo lỗi) dù handshake vẫn thành công bình thường.
-# Vì vậy bắt buộc phải gọi qua wss://fstream.binance.com/market/stream?streams=...
 
 
 async def fetch_top_symbols(n: int = 50) -> list[str]:
@@ -537,34 +475,23 @@ async def fetch_top_symbols(n: int = 50) -> list[str]:
 
 
 class LiveFeed:
-    """Nhận dữ liệu nến real-time qua WebSocket kline stream của Binance Futures (path /market
-    — xem ghi chú ở _FUTURES_WS) — thay cho REST polling định kỳ. Dùng CHUNG 1 nguồn cho tất
-    cả scanner cùng interval, tránh mỗi scanner tự gọi REST lặp lại. WebSocket không có dữ
-    liệu quá khứ nên vẫn cần REST để nạp lịch sử ban đầu, và để đồng bộ lại nếu kết nối bị rớt."""
 
     def __init__(self, symbols: list[str], interval: str, buffer_size: int, name: str | None = None) -> None:
         self.symbols     = sorted({s.upper() for s in symbols})
         self.interval    = interval
         self.buffer_size = buffer_size
-        self.name        = name or interval   # nhãn log riêng — mặc định = interval, nhưng nếu
-                                                 # có 2 LiveFeed CÙNG interval thì cần tên riêng
-                                                 # để phân biệt được trong log (đã từng lẫn lộn,
-                                                 # không biết dòng nào của feed nào khi đọc log thật).
+        self.name        = name or interval
         self.candles: dict[str, deque] = defaultdict(lambda: deque(maxlen=buffer_size))
-        self._last_close: dict[str, int] = {}   # symbol -> close_time_ms đã xử lý
+        self._last_close: dict[str, int] = {}
         self._closed_handlers: list[Callable[[str, list[dict]], Awaitable[None]]] = []
         self._live_handlers: list[Callable[[str, list[dict], dict], Awaitable[None]]] = []
     def on_closed_candle(self, handler: Callable[[str, list[dict]], Awaitable[None]]) -> None:
-        """Đăng ký callback gọi khi 1 nến ĐÃ ĐÓNG (nhận (symbol, candles))."""
         self._closed_handlers.append(handler)
 
     def on_live_tick(self, handler: Callable[[str, list[dict], dict], Awaitable[None]]) -> None:
-        """Đăng ký callback gọi mỗi khi có update giá cho nến ĐANG hình thành
-        (nhận (symbol, closed_candles, live_candle))."""
         self._live_handlers.append(handler)
 
     async def _fetch_history(self, symbols: list[str]) -> None:
-        """Nạp lịch sử nến qua REST — dùng lúc khởi động và khi cần đồng bộ lại sau khi mất kết nối."""
         logger.info(f"[LiveFeed-{self.name}] Nạp lịch sử {len(symbols)} coin...")
         ok, fail = 0, []
         connector = aiohttp.TCPConnector(ssl=False)
@@ -581,15 +508,12 @@ class LiveFeed:
                                 raise ValueError(f"HTTP {resp.status}")
                             rows = await resp.json()
                             self.candles[sym].clear()
-                            for k in rows[:-1]:   # bỏ nến đang mở
+                            for k in rows[:-1]:
                                 self.candles[sym].append({
                                     "open": float(k[1]), "high": float(k[2]),
                                     "low":  float(k[3]), "close": float(k[4]),
                                     "volume": float(k[5]),
-                                    "bar_open": int(k[0]),   # k[0] = open time (ms) — đồng bộ với
-                                                              # nến nạp qua WS (_handle_kline_event),
-                                                              # cần cho kèo Kênh Song Song (điểm xoay
-                                                              # dùng bar_open làm trục thời gian).
+                                    "bar_open": int(k[0]),
                                 })
                             if rows:
                                 self._last_close[sym] = int(rows[-2][6])
@@ -623,19 +547,19 @@ class LiveFeed:
             "open": float(k["o"]), "high": float(k["h"]),
             "low":  float(k["l"]), "close": float(k["c"]),
             "volume": float(k["v"]),
-            "bar_open": int(k["t"]),   # mốc mở nến (ms, do Binance cấp) — dùng để nhận diện "cùng 1 nến"
+            "bar_open": int(k["t"]),
         }
         if len(self.candles[symbol]) < MIN_CANDLES_FOR_SIGNAL:
             return
 
-        if k["x"]:   # nến đã đóng
+        if k["x"]:
             close_time = int(k["T"])
             if self._last_close.get(symbol) == close_time:
                 return
             self._last_close[symbol] = close_time
             self.candles[symbol].append(candle)
             await self._dispatch_closed(symbol, list(self.candles[symbol]))
-        else:        # nến đang hình thành — báo real-time, không chờ đóng
+        else:
             await self._dispatch_live(symbol, list(self.candles[symbol]), candle)
 
     async def _run_connection(self, chunk: list[str]) -> None:
@@ -710,9 +634,6 @@ class LiveFeed:
         logger.info(f"[LiveFeed-{self.name}] Mở {len(chunks)} kết nối WS cho {len(self.symbols)} coin")
         await asyncio.gather(*(self._run_connection(c) for c in chunks))
 
-# ═══════════════════════════════════════════════
-#  SCANNER
-# ═══════════════════════════════════════════════
 async def resolve_symbols(count: int = TOP_SYMBOLS_COUNT) -> list[str]:
     if AUTO_TOP_SYMBOLS:
         logger.info(f"Lấy top {count} cặp từ Binance...")
@@ -727,8 +648,6 @@ async def resolve_symbols(count: int = TOP_SYMBOLS_COUNT) -> list[str]:
 
 
 class Scanner:
-    """Xử lý tín hiệu cho 1 bộ điều kiện (LONG-H1 / SHORT-H1 / LONG-H1 cũ / SHORT-H1 cũ). Không tự lấy
-    dữ liệu — nhận candles từ LiveFeed dùng chung qua on_closed_candle/on_live_tick."""
 
     def __init__(self, symbols: list[str], interval_display: str,
                  chat_id: str, detect_fn: Callable[[str, list[dict]], Signal | None],
@@ -744,9 +663,9 @@ class Scanner:
         self.sl_pct           = sl_pct
         self.message_builder  = message_builder
         self.cooldown_minutes = cooldown_minutes
-        self.daily_stats      = daily_stats   # DailyStats dùng CHUNG với scanner chiều đối diện cùng kèo
+        self.daily_stats      = daily_stats
         self._last_alert: dict[str, datetime] = {}
-        self._positions: dict[str, Position] = {}   # symbol -> lệnh đang mở
+        self._positions: dict[str, Position] = {}
 
     def _cooldown_left(self, symbol: str, direction: str) -> int:
         last = self._last_alert.get(f"{symbol}_{direction}")
@@ -756,8 +675,6 @@ class Scanner:
         return max(0, int(remaining.total_seconds()))
 
     async def _check_position(self, symbol: str, candle: dict) -> None:
-        """Kiểm tra lệnh đang mở của coin này đã chạm TP hay SL chưa (gọi được cả lúc
-        nến đóng lẫn real-time theo từng tick giá)."""
         pos = self._positions.get(symbol)
         if pos is None:
             return
@@ -778,7 +695,7 @@ class Scanner:
 
         await self._check_position(symbol, candles[-1])
         if symbol in self._positions:
-            return   # Lệnh của coin này vẫn đang mở, chưa tìm tín hiệu mới
+            return
 
         signal = self.detect_fn(symbol, candles)
         if signal is None:
@@ -810,50 +727,27 @@ class Scanner:
         await send_signal(signal, self.chat_id, self.interval_display, tp, self.message_builder)
 
     async def on_live_tick(self, symbol: str, candles: list[dict], live_candle: dict) -> None:
-        """Check TP/SL real-time theo từng tick giá, không chờ nến đóng."""
         if symbol not in self.symbols:
             return
         await self._check_position(symbol, live_candle)
 
 
-# SpikeScanner (kèo BB H1 Đột Biến) và MidCrossScanner (kèo BB RSI H1) đã bị XÓA — 2 kèo đó
-# KHÔNG còn chạy trong bot (cùng với executor.py, vốn chỉ 2 kèo này dùng để auto-trade thật).
 
 
 class RsiExtremeScanner:
-    """Kèo RSI H4 Đảo Biên — chạy trên feed H4 RIÊNG (khác feed H1 dùng chung của các kèo
-    khác). Tín hiệu INTRABAR, xét trên MỌI tick giá (kể cả lúc nến H4 CHƯA đóng cửa). Mốc
-    armed và mốc xác nhận bắn TÁCH RIÊNG (lọc bớt tín hiệu nhiễu sát biên):
-      SHORT: RSI(6) đã từng vượt LÊN trên LEGACY_RSI_OVERBOUGHT (90) trong cây H4 đang chạy
-             (armed), rồi sau đó lùi về tới LEGACY_RSI_SHORT_CONFIRM (75) -> báo NGAY.
-      LONG:  RSI(6) đã từng Ở DƯỚI LEGACY_RSI_OVERSOLD (70) tại bất kỳ tick nào trong cây H4
-             đang chạy (armed — KHÔNG cần bắt đúng khoảnh khắc xuyên qua 70, chỉ cần từng ở
-             dưới đó), rồi sau đó ĐI LÊN tới LEGACY_RSI_LONG_CONFIRM (75) -> báo NGAY.
-    Trạng thái armed chỉ có hiệu lực TRONG PHẠM VI 1 cây H4 đang hình thành — tự reset về
-    chưa-armed mỗi khi phát hiện bar_open đổi (nến H4 mới mở), không cộng dồn qua nhiều cây.
-    TP/SL là mốc giá cố định (+LEGACY_TP_PCT/-LEGACY_SL_PCT), dùng chung Position +
-    _position_hit() như các kèo khác. Chỉ báo Telegram — KHÔNG tự đặt lệnh thật (kèo này
-    không nhận executor). Mỗi cặp tối đa 1 tín hiệu LONG + 1 tín hiệu SHORT MỖI NGÀY (2 chiều
-    tính riêng) — xem _already_fired_today."""
 
     def __init__(self, symbols: list[str], chat_id: str,
                  daily_stats: "DailyStats | None" = None) -> None:
         self.symbols     = {s.upper() for s in symbols}
         self.chat_id     = chat_id
         self.daily_stats = daily_stats
-        self._last_fired: dict[tuple[str, str], datetime] = {}   # (symbol, direction) -> lúc
-                                                 # báo GẦN NHẤT — xem _already_fired_today.
+        self._last_fired: dict[tuple[str, str], datetime] = {}
         self._positions: dict[str, Position] = {}
-        # Trạng thái "armed" theo dõi TRONG cây H4 đang chạy — self._bar_open ghi nhớ bar_open
-        # đang được xét để biết khi nào cây H4 MỚI mở (khác bar_open) thì phải reset 2 cờ dưới.
         self._bar_open:    dict[str, int]  = {}
-        self._short_armed: dict[str, bool] = {}   # RSI đã vượt lên >90 trong cây này chưa
-        self._long_armed:  dict[str, bool] = {}   # RSI đã vượt xuống <10 trong cây này chưa
+        self._short_armed: dict[str, bool] = {}
+        self._long_armed:  dict[str, bool] = {}
 
     def _already_fired_today(self, symbol: str, direction: Literal["LONG", "SHORT"]) -> bool:
-        """Mỗi CẶP chỉ báo tối đa 1 lần LONG + 1 lần SHORT MỖI NGÀY — 2 chiều tính TÁCH RIÊNG
-        (đã báo LONG hôm nay không chặn SHORT, và ngược lại), theo NGÀY DƯƠNG LỊCH (đổi ngày lúc
-        00:00 giờ máy chủ) chứ không phải cửa sổ 24h trượt."""
         last = self._last_fired.get((symbol, direction))
         return last is not None and last.date() == datetime.now().date()
 
@@ -873,8 +767,6 @@ class RsiExtremeScanner:
         del self._positions[symbol]
 
     def _reset_arm_if_new_bar(self, symbol: str, bar_open: int | None) -> None:
-        """Nến H4 mới mở (bar_open đổi) -> trạng thái armed của cây CŨ hết hiệu lực, xét lại
-        từ đầu cho cây mới, đúng nghĩa "theo dõi RSI liên tục TRONG cây H4 đang chạy"."""
         if bar_open is None or self._bar_open.get(symbol) == bar_open:
             return
         self._bar_open[symbol]    = bar_open
@@ -884,13 +776,13 @@ class RsiExtremeScanner:
     async def _fire(self, symbol: str, direction: Literal["LONG", "SHORT"],
                      price: float, rsi: float, bar_open: int | None) -> None:
         if symbol in self._positions:
-            return   # Lệnh của coin này vẫn đang mở, chưa mở lệnh mới
+            return
         if self._already_fired_today(symbol, direction):
             logger.info(f"[H4-RSI] {symbol} {direction}: đã báo hôm nay rồi, chờ sang ngày mới")
             return
         self._last_fired[(symbol, direction)] = datetime.now()
 
-        empty_ind: Indicators = {"bb_upper": 0.0, "bb_middle": 0.0, "bb_lower": 0.0}   # kèo này không dùng BB
+        empty_ind: Indicators = {"bb_upper": 0.0, "bb_middle": 0.0, "bb_lower": 0.0}
         signal = Signal(symbol=symbol, direction=direction, price=price, sl=0.0, ind=empty_ind)
         if direction == "SHORT":
             tp = price * (1 - LEGACY_TP_PCT)
@@ -902,8 +794,7 @@ class RsiExtremeScanner:
         self._positions[symbol] = Position(
             symbol=symbol, direction=direction, entry=price,
             tp=tp, sl=signal.sl, opened_at=datetime.now(),
-            entry_bar_open=bar_open,   # xem _position_hit(): tránh tính lùi high/low đã có
-                                         # TRƯỚC lúc vào lệnh trong CHÍNH cây H4 vừa xuyên biên
+            entry_bar_open=bar_open,
         )
         logger.info(f">>> [H4-RSI] TÍN HIỆU: {symbol} {direction} | RSI={rsi:.1f} | "
                     f"Entry={price} | TP={tp} | SL={signal.sl}")
@@ -921,7 +812,7 @@ class RsiExtremeScanner:
         bar_open = live_candle.get("bar_open")
 
         if self._short_armed.get(symbol) and live_rsi <= LEGACY_RSI_SHORT_CONFIRM:
-            self._short_armed[symbol] = False   # tiêu thụ trạng thái armed ngay, tránh báo lặp
+            self._short_armed[symbol] = False
             await self._fire(symbol, "SHORT", live_candle["close"], live_rsi, bar_open)
         elif live_rsi > LEGACY_RSI_OVERBOUGHT:
             self._short_armed[symbol] = True
@@ -937,9 +828,6 @@ class RsiExtremeScanner:
             return
         await self._check_position(symbol, candles[-1])
         if len(candles) >= 2:
-            # Nến vừa đóng cũng là 1 "tick" hợp lệ để xét tín hiệu — dùng candles[:-1] làm
-            # lịch sử đã đóng, candles[-1] (vừa đóng) làm mốc "live" cuối cùng của cây đó,
-            # đảm bảo không bỏ sót đúng lúc chuyển sang cây H4 mới.
             await self._check_signal(symbol, candles[:-1], candles[-1])
 
     async def on_live_tick(self, symbol: str, candles: list[dict], live_candle: dict) -> None:
@@ -949,9 +837,462 @@ class RsiExtremeScanner:
         await self._check_signal(symbol, candles, live_candle)
 
 
-# ═══════════════════════════════════════════════
-#  ENTRY POINT
-# ═══════════════════════════════════════════════
+@dataclass
+class PivotSignal:
+    bar_open: int | None
+    high:     float
+    low:      float
+
+
+def _detect_pivot(candles: list[dict], length: int) -> tuple["PivotSignal | None", "PivotSignal | None"]:
+    n = len(candles)
+    idx = n - 1 - length
+    if idx - length < 0:
+        return None, None
+
+    pivot  = candles[idx]
+    before = candles[idx - length:idx]
+    after  = candles[idx + 1:n]
+
+    is_high = all(pivot["high"] > c["high"] for c in before) and all(pivot["high"] > c["high"] for c in after)
+    is_low  = all(pivot["low"]  < c["low"]  for c in before) and all(pivot["low"]  < c["low"]  for c in after)
+
+    ph = PivotSignal(bar_open=pivot.get("bar_open"), high=pivot["high"], low=pivot["low"]) if is_high else None
+    pl = PivotSignal(bar_open=pivot.get("bar_open"), high=pivot["high"], low=pivot["low"]) if is_low else None
+    return ph, pl
+
+
+def _detect_missed_pivot(candles: list[dict], length: int) -> tuple["PivotSignal | None", "PivotSignal | None"]:
+    n_total = len(candles)
+    if n_total < 2 * length + 1:
+        return None, None
+
+    max_ = min_ = follow_max = follow_min = 0.0
+    max_c = min_c = follow_max_c = follow_min_c = None
+    os_ = 0
+    initialized = False
+    missed_high = missed_low = None
+
+    for n in range(n_total):
+        pivot_idx = n - length
+        if pivot_idx - length < 0:
+            continue
+        before = candles[pivot_idx - length:pivot_idx]
+        after  = candles[pivot_idx + 1:n + 1]
+        if len(before) < length or len(after) < length:
+            continue
+        pb = candles[pivot_idx]
+        hi_len, lo_len = pb["high"], pb["low"]
+
+        if not initialized:
+            max_ = follow_max = hi_len
+            min_ = follow_min = lo_len
+            max_c = follow_max_c = min_c = follow_min_c = pb
+            initialized = True
+            prev_os = os_
+        else:
+            prev_max, prev_min = max_, min_
+            prev_follow_max, prev_follow_min = follow_max, follow_min
+            prev_os = os_
+
+            max_ = max(hi_len, max_)
+            min_ = min(lo_len, min_)
+            follow_max = max(hi_len, follow_max)
+            follow_min = min(lo_len, follow_min)
+
+            if max_ > prev_max:
+                max_c = pb
+                follow_min, follow_min_c = lo_len, pb
+            if min_ < prev_min:
+                min_c = pb
+                follow_max, follow_max_c = hi_len, pb
+
+            if follow_min < prev_follow_min:
+                follow_min_c = pb
+            if follow_max > prev_follow_max:
+                follow_max_c = pb
+
+        is_high = all(pb["high"] > c["high"] for c in before) and all(pb["high"] > c["high"] for c in after)
+        is_low  = all(pb["low"]  < c["low"]  for c in before) and all(pb["low"]  < c["low"]  for c in after)
+
+        this_mh = this_ml = None
+
+        if is_high:
+            ph_val = pb["high"]
+            if prev_os == 1:
+                this_ml = min_c
+            elif ph_val < max_:
+                this_mh = max_c
+                this_ml = follow_min_c
+            os_ = 1
+            max_ = min_ = ph_val
+
+        if is_low:
+            pl_val = pb["low"]
+            if prev_os == 0:
+                this_mh = max_c
+            elif pl_val > min_:
+                this_mh = follow_max_c
+                this_ml = min_c
+            os_ = 0
+            max_ = min_ = pl_val
+
+        if n == n_total - 1:
+            missed_high = PivotSignal(this_mh.get("bar_open"), this_mh["high"], this_mh["low"]) if this_mh else None
+            missed_low  = PivotSignal(this_ml.get("bar_open"), this_ml["high"], this_ml["low"]) if this_ml else None
+
+    return missed_high, missed_low
+
+
+def _detect_running_extreme(candles: list[dict], length: int) -> tuple["PivotSignal | None", "PivotSignal | None"]:
+    n_total = len(candles)
+    if n_total < 2 * length + 1:
+        return None, None
+
+    os_ = 0
+    px1_idx = 0
+
+    for n in range(n_total):
+        pivot_idx = n - length
+        if pivot_idx - length < 0:
+            continue
+        before = candles[pivot_idx - length:pivot_idx]
+        after  = candles[pivot_idx + 1:n + 1]
+        if len(before) < length or len(after) < length:
+            continue
+        pb = candles[pivot_idx]
+        is_high = all(pb["high"] > c["high"] for c in before) and all(pb["high"] > c["high"] for c in after)
+        is_low  = all(pb["low"]  < c["low"]  for c in before) and all(pb["low"]  < c["low"]  for c in after)
+        if is_high:
+            os_ = 1
+            px1_idx = pivot_idx
+        if is_low:
+            os_ = 0
+            px1_idx = pivot_idx
+
+    start = px1_idx + 1
+    if start > n_total - 1:
+        return None, None
+
+    window = candles[start:n_total]
+    last = candles[-1]
+    if os_ == 1:
+        extreme_low = min(c["low"] for c in window)
+        if last["low"] <= extreme_low:
+            return None, PivotSignal(last.get("bar_open"), last["high"], last["low"])
+        return None, None
+    else:
+        extreme_high = max(c["high"] for c in window)
+        if last["high"] >= extreme_high:
+            return PivotSignal(last.get("bar_open"), last["high"], last["low"]), None
+        return None, None
+
+
+@dataclass
+class PivotEntry:
+    price:    float
+    bar_open: int | None
+    qty:      float = 0.0
+
+
+@dataclass
+class PivotPosition:
+    direction: Literal["LONG", "SHORT"]
+    entries:   list[PivotEntry]
+    margin_per_entry: float = 0.0
+
+    @property
+    def avg_entry(self) -> float:
+        return sum(e.price for e in self.entries) / len(self.entries)
+
+    @property
+    def total_qty(self) -> float:
+        return sum(e.qty for e in self.entries)
+
+
+def _build_pivot_open_message(symbol: str, pos: PivotPosition, kind: str, order_err: str | None = None) -> str:
+    is_short = pos.direction == "SHORT"
+    emoji    = "🔴" if is_short else "🟢"
+    lines = [
+        f"*{emoji} {pos.direction} — {KEO_PIVOT_NAME}*",
+        "",
+        f"Coin: `{symbol}`",
+        f"Hành động: *{kind}* (lệnh {len(pos.entries)}/{PIVOT_MAX_DCA + 1})",
+        "",
+    ]
+    for i, e in enumerate(pos.entries, 1):
+        qty_note = f"  ·  KL `{e.qty}` ({PIVOT_LEVERAGE}x)" if e.qty > 0 else ""
+        lines.append(f"Entry {i}: `{_fmt(e.price)}`{qty_note}")
+    lines.append(f"Giá vào TB: `{_fmt(pos.avg_entry)}`")
+    if order_err:
+        lines.append(f"\n⚠️ *ĐẶT LỆNH THẬT THẤT BẠI* — chỉ ghi nhận tín hiệu, KHÔNG có lệnh thật trên sàn:\n`{order_err}`")
+    return "\n".join(lines)
+
+
+def _build_pivot_close_message(symbol: str, pos: PivotPosition, exit_price: float,
+                                pnl_pct: float, reason: str, order_err: str | None = None) -> str:
+    emoji = "✅" if pnl_pct >= 0 else "🛑"
+    lines = [
+        f"*{emoji} ĐÓNG TẤT CẢ {pos.direction} — {KEO_PIVOT_NAME}*",
+        "",
+        f"Coin: `{symbol}`",
+        f"Lý do: {reason}",
+        f"Số lệnh: *{len(pos.entries)}*",
+        f"Giá vào TB: `{_fmt(pos.avg_entry)}`",
+        f"Giá đóng: `{_fmt(exit_price)}`",
+        f"PnL ước tính: *{pnl_pct:+.2f}%*",
+    ]
+    if pos.total_qty > 0:
+        lines.append(f"Tổng khối lượng đã đóng: `{pos.total_qty}`")
+    if order_err:
+        lines.append(f"\n⚠️ *ĐÓNG LỆNH THẬT THẤT BẠI* — vị thế trên sàn có thể VẪN CÒN MỞ, cần tự kiểm tra:\n`{order_err}`")
+    return "\n".join(lines)
+
+
+class BinanceExecutor:
+
+    def __init__(self, api_key: str, api_secret: str, leverage: int, margin_type: str,
+                 account_pct: float, entries_per_position: int,
+                 fixed_margin_usdt: dict[str, float] | None = None) -> None:
+        self.api_key              = api_key
+        self.api_secret           = api_secret
+        self.leverage             = leverage
+        self.margin_type          = margin_type
+        self.account_pct          = account_pct
+        self.entries_per_position = entries_per_position
+        self.fixed_margin_usdt    = {s.upper(): v for s, v in (fixed_margin_usdt or {}).items()}
+        self._qty_precision: dict[str, int] = {}
+        self._time_offset_ms = 0
+
+    async def sync_time(self) -> None:
+        local_before = int(time.time() * 1000)
+        data = await self._request("GET", "v1/time", signed=False)
+        local_after = int(time.time() * 1000)
+        server_time = int(data["serverTime"])
+        local_mid = (local_before + local_after) // 2   # trừ hao độ trễ round-trip của request này
+        self._time_offset_ms = server_time - local_mid
+        logger.info(f"[Pivot Executor] Đồng bộ giờ với Binance — máy lệch {self._time_offset_ms:+d}ms")
+
+    def _sign(self, params: dict) -> dict:
+        params = dict(params)
+        params["timestamp"]  = int(time.time() * 1000) + self._time_offset_ms
+        params["recvWindow"] = 10000
+        query = urlencode(params)
+        params["signature"] = hmac.new(self.api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+        return params
+
+    async def _request(self, method: str, path: str, params: dict | None = None, signed: bool = True) -> dict:
+        params = self._sign(params or {}) if signed else (params or {})
+        url = f"{_FUTURES_REST}/fapi/{path}"
+        headers = {"X-MBX-APIKEY": self.api_key} if signed else {}
+        connector = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            async with session.request(method, url, params=params, headers=headers,
+                                        timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                raw = await resp.text()
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    raise RuntimeError(f"HTTP {resp.status} {path} params={params}: "
+                                        f"phản hồi không phải JSON (có thể sai đường dẫn API): {raw[:300]}")
+                if resp.status != 200:
+                    raise RuntimeError(f"HTTP {resp.status} {path} params={params}: {data}")
+                return data
+
+    async def setup_symbol(self, symbol: str) -> None:
+        info = await self._request("GET", "v1/exchangeInfo", signed=False)
+        for s in info.get("symbols", []):
+            if s["symbol"] == symbol:
+                self._qty_precision[symbol] = s["quantityPrecision"]
+                break
+        else:
+            raise RuntimeError(f"Không tìm thấy symbol {symbol} trong exchangeInfo")
+
+        try:
+            await self._request("POST", "v1/marginType", {"symbol": symbol, "marginType": self.margin_type})
+        except RuntimeError as e:
+            if "-4046" in str(e):
+                pass
+            elif "-4048" in str(e):
+                logger.warning(f"[Pivot Executor] {symbol}: đang có vị thế mở từ trước nên KHÔNG đổi "
+                                f"được margin type sang {self.margin_type} — giữ nguyên margin type "
+                                f"hiện tại trên sàn cho coin này, các bước setup khác vẫn tiếp tục")
+            else:
+                raise
+        await self._request("POST", "v1/leverage", {"symbol": symbol, "leverage": self.leverage})
+
+    async def get_available_balance_usdt(self) -> float:
+        data = await self._request("GET", "v2/balance", {}, signed=True)
+        for asset in data:
+            if asset["asset"] == "USDT":
+                return float(asset["availableBalance"])
+        return 0.0
+
+    async def compute_entry_margin(self, symbol: str) -> float:
+        fixed = self.fixed_margin_usdt.get(symbol.upper())
+        if fixed is not None:
+            return fixed
+        balance = await self.get_available_balance_usdt()
+        return (balance * self.account_pct) / self.entries_per_position
+
+    def _round_qty(self, symbol: str, qty: float) -> float:
+        precision = self._qty_precision.get(symbol, 3)
+        factor = 10 ** precision
+        return math.floor(qty * factor) / factor
+
+    def _fmt_qty(self, symbol: str, qty: float) -> str:
+        precision = self._qty_precision.get(symbol, 3)
+        return f"{qty:.{precision}f}"
+
+    async def market_order(self, symbol: str, side: str, margin_usdt: float, price_hint: float) -> float:
+        notional = margin_usdt * self.leverage
+        qty = self._round_qty(symbol, notional / price_hint)
+        if qty <= 0:
+            raise RuntimeError(f"Khối lượng tính ra = 0 (margin={margin_usdt:.2f} USDT quá nhỏ so với giá/đòn bẩy)")
+        data = await self._request("POST", "v1/order", {
+            "symbol": symbol, "side": side, "type": "MARKET",
+            "quantity": self._fmt_qty(symbol, qty), "newOrderRespType": "RESULT",
+        })
+        return float(data.get("executedQty", qty))
+
+    async def close_position(self, symbol: str, side: str, qty: float) -> None:
+        qty = self._round_qty(symbol, qty)
+        if qty <= 0:
+            return
+        await self._request("POST", "v1/order", {
+            "symbol": symbol, "side": side, "type": "MARKET",
+            "quantity": self._fmt_qty(symbol, qty), "reduceOnly": "true", "newOrderRespType": "RESULT",
+        })
+
+
+class PivotDcaScanner:
+
+    def __init__(self, symbols: list[str], chat_id: str, length: int = PIVOT_LENGTH,
+                 max_dca: int = PIVOT_MAX_DCA, daily_stats: "DailyStats | None" = None,
+                 executor: "BinanceExecutor | None" = None,
+                 dca_confirm_symbols: set[str] | None = None) -> None:
+        self.symbols     = {s.upper() for s in symbols}
+        self.chat_id     = chat_id
+        self.length      = length
+        self.max_dca     = max_dca
+        self.daily_stats = daily_stats
+        self.executor    = executor
+        self.dca_confirm_symbols = {s.upper() for s in (dca_confirm_symbols or set())}
+        self._armed_long:  dict[str, PivotSignal]   = {}
+        self._armed_short: dict[str, PivotSignal]   = {}
+        self._position:    dict[str, PivotPosition] = {}
+
+    async def _close_all(self, symbol: str, price: float, reason: str) -> None:
+        pos = self._position.pop(symbol, None)
+        if pos is None:
+            return
+
+        order_err = None
+        if self.executor is not None and pos.total_qty > 0:
+            side = "SELL" if pos.direction == "LONG" else "BUY"
+            try:
+                await self.executor.close_position(symbol, side, pos.total_qty)
+            except Exception as e:
+                order_err = str(e)
+                logger.error(f"[{KEO_PIVOT_NAME}] {symbol} ĐÓNG LỆNH THẬT THẤT BẠI: {e}")
+
+        avg = pos.avg_entry
+        pnl_pct = (price - avg) / avg * 100 if pos.direction == "LONG" else (avg - price) / avg * 100
+        logger.info(f"[{KEO_PIVOT_NAME}] {symbol} ĐÓNG TẤT CẢ {pos.direction} ({len(pos.entries)} lệnh) "
+                    f"| avg={avg:.4f} exit={price:.4f} PnL~{pnl_pct:+.2f}% | lý do: {reason}")
+        if self.daily_stats is not None:
+            self.daily_stats.record_result("TP" if pnl_pct >= 0 else "SL")
+        text = _build_pivot_close_message(symbol, pos, price, pnl_pct, reason, order_err)
+        await _send_telegram_message(self.chat_id, text, f"PIVOT-{symbol}-CLOSE")
+
+    async def _open_or_dca(self, symbol: str, direction: Literal["LONG", "SHORT"], price: float,
+                            bar_open: int | None) -> None:
+        pos = self._position.get(symbol)
+        if pos is not None and len(pos.entries) > self.max_dca:
+            return
+
+        qty = 0.0
+        order_err = None
+        margin_per_entry = pos.margin_per_entry if pos is not None else 0.0
+        if self.executor is not None:
+            try:
+                if pos is None:
+                    margin_per_entry = await self.executor.compute_entry_margin(symbol)
+                side = "BUY" if direction == "LONG" else "SELL"
+                qty = await self.executor.market_order(symbol, side, margin_per_entry, price)
+            except Exception as e:
+                order_err = str(e)
+                logger.error(f"[{KEO_PIVOT_NAME}] {symbol} ĐẶT LỆNH THẬT THẤT BẠI: {e}")
+
+        entry = PivotEntry(price=price, bar_open=bar_open, qty=qty)
+        if pos is None:
+            pos = PivotPosition(direction=direction, entries=[entry], margin_per_entry=margin_per_entry)
+            self._position[symbol] = pos
+            kind = "MỞ LỆNH"
+            if self.daily_stats is not None:
+                self.daily_stats.record_open()
+        else:
+            pos.entries.append(entry)
+            kind = f"DCA lần {len(pos.entries) - 1}"
+
+        logger.info(f"[{KEO_PIVOT_NAME}] {symbol} {direction} {kind} tại {price:.4f} "
+                    f"(tổng {len(pos.entries)} lệnh, avg={pos.avg_entry:.4f})")
+        text = _build_pivot_open_message(symbol, pos, kind, order_err)
+        await _send_telegram_message(self.chat_id, text, f"PIVOT-{symbol}-{direction}")
+
+    async def on_closed_candle(self, symbol: str, candles: list[dict]) -> None:
+        if symbol not in self.symbols:
+            return
+
+        c = candles[-1]
+
+        needs_confirm = symbol in self.dca_confirm_symbols
+
+        armed_long = self._armed_long.pop(symbol, None)
+        if armed_long is not None and c["low"] >= armed_long.low:
+            pos = self._position.get(symbol)
+            if pos is None:
+                await self._open_or_dca(symbol, "LONG", c["close"], c.get("bar_open"))
+            elif pos.direction == "LONG" and len(pos.entries) <= self.max_dca and needs_confirm:
+                await self._open_or_dca(symbol, "LONG", c["close"], c.get("bar_open"))
+
+        armed_short = self._armed_short.pop(symbol, None)
+        if armed_short is not None and c["high"] <= armed_short.high:
+            pos = self._position.get(symbol)
+            if pos is None:
+                await self._open_or_dca(symbol, "SHORT", c["close"], c.get("bar_open"))
+            elif pos.direction == "SHORT" and len(pos.entries) <= self.max_dca and needs_confirm:
+                await self._open_or_dca(symbol, "SHORT", c["close"], c.get("bar_open"))
+
+        ph, pl = _detect_running_extreme(candles, self.length)
+
+        if pl is not None:
+            pos = self._position.get(symbol)
+            if pos is not None and pos.direction == "SHORT":
+                await self._close_all(symbol, c["close"], "tín hiệu tăng (▲) xuất hiện")
+                pos = None
+            if pos is None:
+                self._armed_long[symbol] = pl
+            elif pos.direction == "LONG" and len(pos.entries) <= self.max_dca:
+                if needs_confirm:
+                    self._armed_long[symbol] = pl
+                else:
+                    await self._open_or_dca(symbol, "LONG", c["close"], c.get("bar_open"))
+
+        if ph is not None:
+            pos = self._position.get(symbol)
+            if pos is not None and pos.direction == "LONG":
+                await self._close_all(symbol, c["close"], "tín hiệu giảm (▼) xuất hiện")
+                pos = None
+            if pos is None:
+                self._armed_short[symbol] = ph
+            elif pos.direction == "SHORT" and len(pos.entries) <= self.max_dca:
+                if needs_confirm:
+                    self._armed_short[symbol] = ph
+                else:
+                    await self._open_or_dca(symbol, "SHORT", c["close"], c.get("bar_open"))
+
+
 def _banner() -> None:
     logger.info("=" * 50)
     logger.info("  Binance Futures Song Kiem Signal Bot (WebSocket real-time)")
@@ -962,7 +1303,9 @@ def _banner() -> None:
     else:
         logger.info(f"  Symbol    : Thủ công {len(SYMBOLS)} cặp")
     logger.info(f"  Timeframe : {INTERVAL_H1_DISPLAY} (kèo Rút Râu) | "
-                f"{INTERVAL_H4_DISPLAY} (kèo RSI Đảo Biên)")
+                f"{INTERVAL_H4_DISPLAY} (kèo RSI Đảo Biên) | "
+                f"{INTERVAL_M5_DISPLAY} (Pivot DCA — {','.join(PIVOT_SYMBOLS_M5)}) | "
+                f"{INTERVAL_M15_DISPLAY} (Pivot DCA — {','.join(PIVOT_SYMBOLS_M15)})")
     logger.info(f"  Nguồn nến : Futures WebSocket (path /market)")
     logger.info(f"  {KEO_RUTRAU_NAME:<22} -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID else 'OK'}  "
                 f"TP/SL={DOJI_TP_PCT*100:.1f}%/{DOJI_SL_PCT*100:.1f}%")
@@ -970,6 +1313,19 @@ def _banner() -> None:
                 f"TP/SL={LEGACY_TP_PCT*100:.1f}%/{LEGACY_SL_PCT*100:.1f}%  "
                 f"RSI({LEGACY_RSI_PERIOD}) armed={LEGACY_RSI_OVERSOLD}/{LEGACY_RSI_OVERBOUGHT} "
                 f"bắn={LEGACY_RSI_LONG_CONFIRM}/{LEGACY_RSI_SHORT_CONFIRM} (intrabar)")
+    logger.info(f"  {KEO_PIVOT_NAME:<22} -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID_PIVOT else 'OK'}  "
+                f"length={PIVOT_LENGTH}  DCA tối đa={PIVOT_MAX_DCA} lần  coin={','.join(PIVOT_SYMBOLS)}  "
+                f"(không TP/SL, đóng theo tín hiệu đối nghịch)")
+    if PIVOT_LIVE_TRADING and BINANCE_API_KEY and BINANCE_API_SECRET:
+        logger.warning(f"  ⚠️  ĐẶT LỆNH THẬT (MAINNET) ĐANG BẬT cho {KEO_PIVOT_NAME} — "
+                        f"x{PIVOT_LEVERAGE} đòn bẩy, {PIVOT_ACCOUNT_PCT*100:.1f}% tài khoản/vị thế, "
+                        f"{PIVOT_MARGIN_TYPE}")
+        print("=" * 50)
+        print(f"  ⚠️  CẢNH BÁO: ĐANG ĐẶT LỆNH THẬT BẰNG TIỀN THẬT (MAINNET) — x{PIVOT_LEVERAGE} đòn bẩy")
+        print("=" * 50)
+    elif PIVOT_LIVE_TRADING:
+        logger.warning(f"  PIVOT_LIVE_TRADING=True nhưng thiếu BINANCE_API_KEY/SECRET -> "
+                        f"{KEO_PIVOT_NAME} chạy CHỈ TÍN HIỆU, không đặt lệnh thật")
     logger.info(f"  BB        : period={BB_PERIOD}  std={BB_STD}")
     logger.info(f"  Cooldown  : {ALERT_COOLDOWN_MINUTES} phút (mới/đột biến)  |  "
                 f"tối đa 1 LONG + 1 SHORT/ngày mỗi cặp (RSI H4)")
@@ -977,7 +1333,6 @@ def _banner() -> None:
 
 
 async def _check_telegram_connection(chat_id: str, label: str) -> None:
-    """Chỉ kiểm tra token + chat_id có hợp lệ không (qua getChat) — KHÔNG gửi tin nhắn vào chat."""
     if not TELEGRAM_TOKEN or not chat_id:
         print("=" * 50)
         print(f"  [LỖI] Chưa điền TELEGRAM_TOKEN hoặc chat ID cho {label}")
@@ -1006,11 +1361,10 @@ async def _check_telegram_connection(chat_id: str, label: str) -> None:
 async def _check_telegram_connections() -> None:
     await _check_telegram_connection(TELEGRAM_CHAT_ID, "NEW-H1")
     await _check_telegram_connection(TELEGRAM_CHAT_ID_H1, "RSI-H4")
+    await _check_telegram_connection(TELEGRAM_CHAT_ID_PIVOT, "PIVOT-DCA")
 
 
 async def _run_forever(label: str, feed: LiveFeed) -> None:
-    """Chạy LiveFeed vô hạn; nếu crash bất ngờ (hiếm, vì LiveFeed đã tự retry nội bộ)
-    thì log + khởi động lại thay vì để cả bot dừng hẳn."""
     while True:
         try:
             await feed.run()
@@ -1020,11 +1374,6 @@ async def _run_forever(label: str, feed: LiveFeed) -> None:
 
 
 async def daily_stats_scheduler(stats_list: list[DailyStats]) -> None:
-    """Gửi thống kê cuối ngày cho từng kèo lúc 23:55 — mỗi kèo về đúng kênh của nó, ước lượng
-    theo nến (DailyStats.build_message). Reset lại bộ đếm sau khi gửi.
-
-    (Trước đây còn nhận thêm executor + executor_targets để gửi thống kê PnL THẬT cho 2 kèo
-    auto-trade (Đột Biến, BB RSI H1) — đã bỏ cùng lúc xóa 2 kèo đó + executor.py.)"""
     while True:
         now = datetime.now()
         target = now.replace(hour=23, minute=55, second=0, microsecond=0)
@@ -1043,7 +1392,16 @@ async def daily_stats_scheduler(stats_list: list[DailyStats]) -> None:
                 logger.error(f"[DailyStats] Gửi thống kê {stats.name} lỗi: {e}")
             stats.reset()
 
-        await asyncio.sleep(61)   # tránh kích hoạt 2 lần trong cùng phút
+        await asyncio.sleep(61)
+
+
+async def _periodic_time_sync(executor: "BinanceExecutor", interval_sec: int = 1800) -> None:
+    while True:
+        await asyncio.sleep(interval_sec)
+        try:
+            await executor.sync_time()
+        except Exception as e:
+            logger.error(f"[Pivot Executor] Đồng bộ lại giờ thất bại (giữ nguyên lệch cũ): {e}")
 
 
 async def _main() -> None:
@@ -1055,9 +1413,12 @@ async def _main() -> None:
 
         feed         = LiveFeed(symbols, INTERVAL_H1, CANDLE_BUFFER, name="1h")
         feed_h4      = LiveFeed(legacy_symbols, INTERVAL_H4, CANDLE_BUFFER, name="4h-RSI")
+        feed_pivot_m5  = LiveFeed(PIVOT_SYMBOLS_M5, INTERVAL_M5, PIVOT_CANDLE_BUFFER, name="5m-Pivot")
+        feed_pivot_m15 = LiveFeed(PIVOT_SYMBOLS_M15, INTERVAL_M15, PIVOT_CANDLE_BUFFER, name="15m-Pivot")
 
         h1_stats      = DailyStats(KEO_RUTRAU_NAME, TELEGRAM_CHAT_ID)
         legacy_stats  = DailyStats(KEO_LEGACY_NAME, TELEGRAM_CHAT_ID_H1)
+        pivot_stats   = DailyStats(KEO_PIVOT_NAME, TELEGRAM_CHAT_ID_PIVOT)
 
         long_scanner = Scanner(
             symbols, KEO_RUTRAU_NAME, TELEGRAM_CHAT_ID,
@@ -1075,6 +1436,28 @@ async def _main() -> None:
             legacy_symbols, TELEGRAM_CHAT_ID_H1, daily_stats=legacy_stats,
         )
 
+        pivot_executor: "BinanceExecutor | None" = None
+        if PIVOT_LIVE_TRADING and BINANCE_API_KEY and BINANCE_API_SECRET:
+            candidate = BinanceExecutor(
+                BINANCE_API_KEY, BINANCE_API_SECRET, PIVOT_LEVERAGE, PIVOT_MARGIN_TYPE,
+                PIVOT_ACCOUNT_PCT, PIVOT_MAX_DCA + 1,
+                fixed_margin_usdt=PIVOT_FIXED_MARGIN_USDT,
+            )
+            try:
+                await candidate.sync_time()
+                for sym in PIVOT_SYMBOLS:
+                    await candidate.setup_symbol(sym)
+                    logger.info(f"[Pivot Executor] {sym}: đã đặt {PIVOT_MARGIN_TYPE} x{PIVOT_LEVERAGE}")
+                pivot_executor = candidate
+            except Exception as e:
+                logger.critical(f"[Pivot Executor] LỖI setup ({e}) -> {KEO_PIVOT_NAME} chạy CHỈ "
+                                 f"TÍN HIỆU, KHÔNG đặt lệnh thật", exc_info=True)
+
+        pivot_scanner = PivotDcaScanner(
+            PIVOT_SYMBOLS, TELEGRAM_CHAT_ID_PIVOT, daily_stats=pivot_stats, executor=pivot_executor,
+            dca_confirm_symbols=set(PIVOT_SYMBOLS_M5),
+        )
+
         for sc in (long_scanner, short_scanner):
             feed.on_closed_candle(sc.on_closed_candle)
             feed.on_live_tick(sc.on_live_tick)
@@ -1082,11 +1465,18 @@ async def _main() -> None:
         feed_h4.on_closed_candle(h4_rsi_scanner.on_closed_candle)
         feed_h4.on_live_tick(h4_rsi_scanner.on_live_tick)
 
-        stats_tasks = [daily_stats_scheduler([h1_stats, legacy_stats])]
+        feed_pivot_m5.on_closed_candle(pivot_scanner.on_closed_candle)
+        feed_pivot_m15.on_closed_candle(pivot_scanner.on_closed_candle)
+
+        stats_tasks = [daily_stats_scheduler([h1_stats, legacy_stats, pivot_stats])]
+        if pivot_executor is not None:
+            stats_tasks.append(_periodic_time_sync(pivot_executor))
 
         await asyncio.gather(
             _run_forever("LiveFeed-H1", feed),
             _run_forever("LiveFeed-H4", feed_h4),
+            _run_forever("LiveFeed-M5-Pivot", feed_pivot_m5),
+            _run_forever("LiveFeed-M15-Pivot", feed_pivot_m15),
             *stats_tasks,
         )
     except KeyboardInterrupt:
