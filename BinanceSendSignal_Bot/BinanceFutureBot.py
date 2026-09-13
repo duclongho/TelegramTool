@@ -39,6 +39,52 @@ PIVOT_SYMBOLS_M15 = [
     "BNBUSDT",
     "ETHUSDT",
     "BTCUSDT",
+    "ZECUSDT",
+    "SOLUSDT",
+    "SNDKUSDT",
+    "CLUSDT",
+    "XRPUSDT",
+    "SOXLUSDT",
+    "XAGUSDT",
+    "SPCXUSDT",
+    "BZUSDT",
+    "HYPEUSDT",
+    "ARBUSDT",
+    "SKHYNIXUSDT",
+    "DOGEUSDT",
+    "NEARUSDT",
+    "KORUUSDT",
+    "MUUSDT",
+    "SKHYUSDT",
+    "QQQUSDT",
+    "SNXXUSDT",
+    "LABUSDT",
+    "RAYSOLUSDT",
+    "SUIUSDT",
+    "1000PEPEUSDT",
+    "ENAUSDT",
+    "VTHOUSDT",
+    "LSKUSDT",
+    "UNIUSDT",
+    "CRCLUSDT",
+    "ADAUSDT",
+    "MSTRUSDT",
+    "LINKUSDT",
+    "PUMPUSDT",
+    "PONSUSDT",
+    "METUSDT",
+    "USELESSUSDT",
+    "TAOUSDT",
+    "WLDUSDT",
+    "MARSCOINUSDT",
+    "SOXSUSDT",
+    "NVDAUSDT",
+    "INTCUSDT",
+    "TRUMPUSDT",
+    "ORCLUSDT",
+    "DRAMUSDT",
+    "IOSTUSDT",
+    "VVVUSDT",
 ]
 PIVOT_SYMBOLS = PIVOT_SYMBOLS_M5 + PIVOT_SYMBOLS_M15
 
@@ -81,15 +127,66 @@ LEGACY_SL_PCT = 0.03
 PIVOT_LENGTH  = 50
 PIVOT_MAX_DCA = 2
 PIVOT_CANDLE_BUFFER = 500
+PIVOT_BE_ARM_ROI_PCT = 20.0
+PIVOT_CLOSE_MAX_ATTEMPTS = 5
+PIVOT_CLOSE_RETRY_SEC    = 5.0
 
 PIVOT_LIVE_TRADING  = True
 BINANCE_API_KEY     = "FPaPRx6ECzzQ25RgVqjozp3qsFMrc5u3vQScdfecy7oZUEs7UKUcdjdixtb03uNI"
 BINANCE_API_SECRET  = "t7MqGdFRTAyVLmRhzRn7o3ixHEU83YnJzqsQUsPpxfkiktqsOQ7crQSisCqM6FYw"
-PIVOT_LEVERAGE      = 50
+PIVOT_LEVERAGE      = 20
 PIVOT_MARGIN_TYPE   = "CROSSED"
-PIVOT_ACCOUNT_PCT   = 0.05
 PIVOT_FIXED_MARGIN_USDT = {
     "XAUUSDT": 5.0,
+    "BNBUSDT": 2.5,
+    "ETHUSDT": 2.5,
+    "BTCUSDT": 2.5,
+    "ZECUSDT": 2.5,
+    "SOLUSDT": 2.5,
+    "SNDKUSDT": 2.5,
+    "CLUSDT": 2.5,
+    "XRPUSDT": 2.5,
+    "SOXLUSDT": 2.5,
+    "XAGUSDT": 2.5,
+    "SPCXUSDT": 2.5,
+    "BZUSDT": 2.5,
+    "HYPEUSDT": 2.5,
+    "ARBUSDT": 2.5,
+    "SKHYNIXUSDT": 2.5,
+    "DOGEUSDT": 2.5,
+    "NEARUSDT": 2.5,
+    "KORUUSDT": 2.5,
+    "MUUSDT": 2.5,
+    "SKHYUSDT": 2.5,
+    "QQQUSDT": 2.5,
+    "SNXXUSDT": 2.5,
+    "LABUSDT": 2.5,
+    "RAYSOLUSDT": 2.5,
+    "SUIUSDT": 2.5,
+    "1000PEPEUSDT": 2.5,
+    "ENAUSDT": 2.5,
+    "VTHOUSDT": 2.5,
+    "LSKUSDT": 2.5,
+    "UNIUSDT": 2.5,
+    "CRCLUSDT": 2.5,
+    "ADAUSDT": 2.5,
+    "MSTRUSDT": 2.5,
+    "LINKUSDT": 2.5,
+    "PUMPUSDT": 2.5,
+    "PONSUSDT": 2.5,
+    "METUSDT": 2.5,
+    "USELESSUSDT": 2.5,
+    "TAOUSDT": 2.5,
+    "WLDUSDT": 2.5,
+    "MARSCOINUSDT": 2.5,
+    "SOXSUSDT": 2.5,
+    "NVDAUSDT": 2.5,
+    "INTCUSDT": 2.5,
+    "TRUMPUSDT": 2.5,
+    "ORCLUSDT": 2.5,
+    "DRAMUSDT": 2.5,
+    "IOSTUSDT": 2.5,
+    "VVVUSDT": 2.5,
 }
 
 WS_MAX_STREAMS_PER_CONN = 190
@@ -990,9 +1087,12 @@ def _detect_running_extreme(candles: list[dict], length: int) -> tuple["PivotSig
 
 @dataclass
 class PivotEntry:
-    price:    float
-    bar_open: int | None
-    qty:      float = 0.0
+    price:       float
+    bar_open:    int | None
+    qty:         float = 0.0
+    be_armed:    bool = False
+    be_pending:  bool = False
+    sl_order_id: int | None = None
 
 
 @dataclass
@@ -1049,19 +1149,60 @@ def _build_pivot_close_message(symbol: str, pos: PivotPosition, exit_price: floa
     return "\n".join(lines)
 
 
+def _build_pivot_be_message(symbol: str, direction: str, entry: "PivotEntry", price: float,
+                             remaining: int, order_err: str | None = None) -> str:
+    lines = [
+        f"*🛡️ DỜI SL VỀ BE — {KEO_PIVOT_NAME}*",
+        "",
+        f"Coin: `{symbol}`",
+        f"Hướng: {direction}",
+        f"Lệnh entry: `{_fmt(entry.price)}` — đã đạt +{PIVOT_BE_ARM_ROI_PCT:.0f}% ROI rồi quay lại hòa vốn",
+        f"Giá đóng: `{_fmt(price)}`",
+        f"Còn lại: *{remaining}* lệnh trong vị thế" if remaining > 0 else "Đã đóng hết vị thế (toàn bộ lệnh đều hòa vốn/lãi)",
+    ]
+    if order_err:
+        lines.append(f"\n⚠️ *ĐÓNG LỆNH THẬT THẤT BẠI* — vị thế trên sàn có thể VẪN CÒN, cần tự kiểm tra:\n`{order_err}`")
+    return "\n".join(lines)
+
+
+def _build_pivot_be_arm_message(symbol: str, direction: str, entry: "PivotEntry",
+                                 order_id: int | None, order_err: str | None) -> str:
+    if order_id is not None:
+        lines = [
+            f"*🛡️ ĐÃ DỜI SL VỀ ENTRY — {KEO_PIVOT_NAME}*",
+            "",
+            f"Coin: `{symbol}`",
+            f"Hướng: {direction}",
+            f"Lệnh entry: `{_fmt(entry.price)}` — đã đạt +{PIVOT_BE_ARM_ROI_PCT:.0f}% ROI",
+            f"Đã đặt lệnh SL thật (STOP_MARKET) tại giá vào lệnh `{_fmt(entry.price)}` trên sàn — "
+            f"lệnh này vẫn được bảo vệ kể cả khi bot mất kết nối/khởi động lại",
+            f"orderId: `{order_id}`",
+        ]
+    else:
+        lines = [
+            f"*⚠️ ĐẶT SL THẤT BẠI — {KEO_PIVOT_NAME}*",
+            "",
+            f"Coin: `{symbol}`",
+            f"Hướng: {direction}",
+            f"Lệnh entry: `{_fmt(entry.price)}` đã đạt +{PIVOT_BE_ARM_ROI_PCT:.0f}% ROI nhưng KHÔNG đặt "
+            f"được SL thật trên sàn — vị thế đang KHÔNG có gì bảo vệ, cần tự kiểm tra:",
+            f"`{order_err}`",
+        ]
+    return "\n".join(lines)
+
+
 class BinanceExecutor:
 
     def __init__(self, api_key: str, api_secret: str, leverage: int, margin_type: str,
-                 account_pct: float, entries_per_position: int,
-                 fixed_margin_usdt: dict[str, float] | None = None) -> None:
+                 fixed_margin_usdt: dict[str, float]) -> None:
         self.api_key              = api_key
         self.api_secret           = api_secret
         self.leverage             = leverage
         self.margin_type          = margin_type
-        self.account_pct          = account_pct
-        self.entries_per_position = entries_per_position
-        self.fixed_margin_usdt    = {s.upper(): v for s, v in (fixed_margin_usdt or {}).items()}
+        self.fixed_margin_usdt    = {s.upper(): v for s, v in fixed_margin_usdt.items()}
         self._qty_precision: dict[str, int] = {}
+        self._price_precision: dict[str, int] = {}
+        self._min_notional: dict[str, float] = {}
         self._time_offset_ms = 0
 
     async def sync_time(self) -> None:
@@ -1104,6 +1245,10 @@ class BinanceExecutor:
         for s in info.get("symbols", []):
             if s["symbol"] == symbol:
                 self._qty_precision[symbol] = s["quantityPrecision"]
+                self._price_precision[symbol] = s["pricePrecision"]
+                for f in s.get("filters", []):
+                    if f.get("filterType") == "MIN_NOTIONAL":
+                        self._min_notional[symbol] = float(f["notional"])
                 break
         else:
             raise RuntimeError(f"Không tìm thấy symbol {symbol} trong exchangeInfo")
@@ -1128,25 +1273,50 @@ class BinanceExecutor:
                 return float(asset["availableBalance"])
         return 0.0
 
+    async def get_all_positions(self) -> dict[str, float]:
+        data = await self._request("GET", "v2/positionRisk", {}, signed=True)
+        result: dict[str, float] = {}
+        for p in data:
+            amt = float(p["positionAmt"])
+            if amt != 0:
+                result[p["symbol"]] = amt
+        return result
+
     async def compute_entry_margin(self, symbol: str) -> float:
         fixed = self.fixed_margin_usdt.get(symbol.upper())
-        if fixed is not None:
-            return fixed
-        balance = await self.get_available_balance_usdt()
-        return (balance * self.account_pct) / self.entries_per_position
+        if fixed is None:
+            raise RuntimeError(f"{symbol} chưa có margin cố định trong PIVOT_FIXED_MARGIN_USDT — "
+                                f"thêm coin mới phải khai báo margin luôn, không còn dự phòng %")
+        return fixed
 
     def _round_qty(self, symbol: str, qty: float) -> float:
         precision = self._qty_precision.get(symbol, 3)
         factor = 10 ** precision
-        return math.floor(qty * factor) / factor
+        return math.floor(qty * factor + 1e-8) / factor
+
+    def _round_qty_up(self, symbol: str, qty: float) -> float:
+        precision = self._qty_precision.get(symbol, 3)
+        factor = 10 ** precision
+        return math.ceil(qty * factor) / factor
 
     def _fmt_qty(self, symbol: str, qty: float) -> str:
         precision = self._qty_precision.get(symbol, 3)
         return f"{qty:.{precision}f}"
 
+    def _fmt_price(self, symbol: str, price: float) -> str:
+        precision = self._price_precision.get(symbol, 4)
+        return f"{price:.{precision}f}"
+
     async def market_order(self, symbol: str, side: str, margin_usdt: float, price_hint: float) -> float:
         notional = margin_usdt * self.leverage
-        qty = self._round_qty(symbol, notional / price_hint)
+        min_notional = self._min_notional.get(symbol, 20.0)
+        if notional < min_notional:
+            qty = self._round_qty_up(symbol, min_notional / price_hint)
+            logger.warning(f"[Pivot Executor] {symbol}: margin {margin_usdt:.2f} USDT x{self.leverage} "
+                            f"= {notional:.2f} USDT < tối thiểu {min_notional:.2f} USDT -> tự nâng "
+                            f"khối lượng lên {qty} (~{qty * price_hint:.2f} USDT) để lệnh vào được")
+        else:
+            qty = self._round_qty(symbol, notional / price_hint)
         if qty <= 0:
             raise RuntimeError(f"Khối lượng tính ra = 0 (margin={margin_usdt:.2f} USDT quá nhỏ so với giá/đòn bẩy)")
         data = await self._request("POST", "v1/order", {
@@ -1158,11 +1328,36 @@ class BinanceExecutor:
     async def close_position(self, symbol: str, side: str, qty: float) -> None:
         qty = self._round_qty(symbol, qty)
         if qty <= 0:
-            return
+            raise RuntimeError(f"{symbol}: khối lượng đóng làm tròn về 0 (qty gốc={qty} quá nhỏ so với "
+                                f"độ chính xác cho phép) -> KHÔNG gửi lệnh đóng thật, vị thế trên sàn có "
+                                f"thể vẫn còn")
         await self._request("POST", "v1/order", {
             "symbol": symbol, "side": side, "type": "MARKET",
             "quantity": self._fmt_qty(symbol, qty), "reduceOnly": "true", "newOrderRespType": "RESULT",
         })
+
+    async def place_stop_market(self, symbol: str, side: str, qty: float, stop_price: float) -> int:
+        qty = self._round_qty(symbol, qty)
+        if qty <= 0:
+            raise RuntimeError(f"{symbol}: khối lượng đặt SL làm tròn về 0 (qty gốc quá nhỏ so với "
+                                f"độ chính xác cho phép)")
+        data = await self._request("POST", "v1/order", {
+            "symbol": symbol, "side": side, "type": "STOP_MARKET",
+            "quantity": self._fmt_qty(symbol, qty), "stopPrice": self._fmt_price(symbol, stop_price),
+            "reduceOnly": "true", "newOrderRespType": "RESULT",
+        })
+        return int(data["orderId"])
+
+    async def cancel_order(self, symbol: str, order_id: int) -> None:
+        try:
+            await self._request("DELETE", "v1/order", {"symbol": symbol, "orderId": order_id})
+        except RuntimeError as e:
+            if "-2011" in str(e):
+                return
+            raise
+
+    async def get_order_status(self, symbol: str, order_id: int) -> dict:
+        return await self._request("GET", "v1/order", {"symbol": symbol, "orderId": order_id})
 
 
 class PivotDcaScanner:
@@ -1182,28 +1377,169 @@ class PivotDcaScanner:
         self._armed_short: dict[str, PivotSignal]   = {}
         self._position:    dict[str, PivotPosition] = {}
 
+    async def _close_qty_with_retry(self, symbol: str, side: str, qty: float) -> tuple[bool, str | None]:
+        if self.executor is None or qty <= 0:
+            return True, None
+
+        remaining_qty = qty
+        order_err = None
+        for attempt in range(1, PIVOT_CLOSE_MAX_ATTEMPTS + 1):
+            try:
+                await self.executor.close_position(symbol, side, remaining_qty)
+            except Exception as e:
+                order_err = str(e)
+                logger.error(f"[{KEO_PIVOT_NAME}] {symbol} đóng lệnh lỗi (lần {attempt}/"
+                             f"{PIVOT_CLOSE_MAX_ATTEMPTS}): {e}")
+                if attempt < PIVOT_CLOSE_MAX_ATTEMPTS:
+                    await asyncio.sleep(PIVOT_CLOSE_RETRY_SEC)
+                continue
+
+            await asyncio.sleep(1.0)
+            try:
+                real_positions = await self.executor.get_all_positions()
+            except Exception as e:
+                return False, f"đã gửi lệnh đóng nhưng không xác minh được vị thế thật: {e}"
+
+            real_qty = abs(real_positions.get(symbol, 0.0))
+            if real_qty < 1e-9 or real_qty < remaining_qty * 0.05:
+                return True, None
+
+            order_err = (f"đã gửi lệnh đóng nhưng sàn vẫn còn {real_qty} sau khi xác minh lại "
+                         f"(lần {attempt}/{PIVOT_CLOSE_MAX_ATTEMPTS})")
+            logger.warning(f"[{KEO_PIVOT_NAME}] {symbol} {order_err}")
+            remaining_qty = real_qty
+            if attempt < PIVOT_CLOSE_MAX_ATTEMPTS:
+                await asyncio.sleep(PIVOT_CLOSE_RETRY_SEC)
+
+        return False, order_err
+
     async def _close_all(self, symbol: str, price: float, reason: str) -> None:
         pos = self._position.pop(symbol, None)
         if pos is None:
             return
+        asyncio.create_task(self._close_all_background(symbol, pos, price, reason))
 
-        order_err = None
-        if self.executor is not None and pos.total_qty > 0:
+    async def _close_all_background(self, symbol: str, pos: "PivotPosition", price: float, reason: str) -> None:
+        try:
+            if self.executor is not None:
+                for entry in pos.entries:
+                    if entry.sl_order_id is not None:
+                        try:
+                            await self.executor.cancel_order(symbol, entry.sl_order_id)
+                        except Exception as e:
+                            logger.warning(f"[{KEO_PIVOT_NAME}] {symbol} hủy SL orderId="
+                                           f"{entry.sl_order_id} lỗi (bỏ qua): {e}")
+
             side = "SELL" if pos.direction == "LONG" else "BUY"
-            try:
-                await self.executor.close_position(symbol, side, pos.total_qty)
-            except Exception as e:
-                order_err = str(e)
-                logger.error(f"[{KEO_PIVOT_NAME}] {symbol} ĐÓNG LỆNH THẬT THẤT BẠI: {e}")
+            ok, order_err = await self._close_qty_with_retry(symbol, side, pos.total_qty)
+            if not ok:
+                logger.critical(f"[{KEO_PIVOT_NAME}] {symbol} ĐÓNG TẤT CẢ THẤT BẠI SAU "
+                                 f"{PIVOT_CLOSE_MAX_ATTEMPTS} LẦN THỬ: {order_err}")
 
-        avg = pos.avg_entry
-        pnl_pct = (price - avg) / avg * 100 if pos.direction == "LONG" else (avg - price) / avg * 100
-        logger.info(f"[{KEO_PIVOT_NAME}] {symbol} ĐÓNG TẤT CẢ {pos.direction} ({len(pos.entries)} lệnh) "
-                    f"| avg={avg:.4f} exit={price:.4f} PnL~{pnl_pct:+.2f}% | lý do: {reason}")
-        if self.daily_stats is not None:
-            self.daily_stats.record_result("TP" if pnl_pct >= 0 else "SL")
-        text = _build_pivot_close_message(symbol, pos, price, pnl_pct, reason, order_err)
-        await _send_telegram_message(self.chat_id, text, f"PIVOT-{symbol}-CLOSE")
+            avg = pos.avg_entry
+            pnl_pct = (price - avg) / avg * 100 if pos.direction == "LONG" else (avg - price) / avg * 100
+            logger.info(f"[{KEO_PIVOT_NAME}] {symbol} ĐÓNG TẤT CẢ {pos.direction} ({len(pos.entries)} lệnh) "
+                        f"| avg={avg:.4f} exit={price:.4f} PnL~{pnl_pct:+.2f}% | lý do: {reason}")
+            if self.daily_stats is not None:
+                self.daily_stats.record_result("TP" if pnl_pct >= 0 else "SL")
+            text = _build_pivot_close_message(symbol, pos, price, pnl_pct, reason, order_err)
+            await _send_telegram_message(self.chat_id, text, f"PIVOT-{symbol}-CLOSE")
+        except Exception as e:
+            logger.error(f"[{KEO_PIVOT_NAME}] {symbol} lỗi không mong đợi khi đóng tất cả: {e}", exc_info=True)
+
+    def snapshot_positions(self) -> dict[str, tuple[str, float]]:
+        return {symbol: (pos.direction, pos.total_qty) for symbol, pos in self._position.items()}
+
+    async def _place_stop_with_retry(self, symbol: str, side: str, qty: float,
+                                      stop_price: float) -> tuple[int | None, str | None]:
+        if self.executor is None or qty <= 0:
+            return None, None
+        err = None
+        for attempt in range(1, PIVOT_CLOSE_MAX_ATTEMPTS + 1):
+            try:
+                order_id = await self.executor.place_stop_market(symbol, side, qty, stop_price)
+                return order_id, None
+            except Exception as e:
+                err = str(e)
+                logger.error(f"[{KEO_PIVOT_NAME}] {symbol} đặt SL lỗi (lần {attempt}/"
+                             f"{PIVOT_CLOSE_MAX_ATTEMPTS}): {e}")
+                if attempt < PIVOT_CLOSE_MAX_ATTEMPTS:
+                    await asyncio.sleep(PIVOT_CLOSE_RETRY_SEC)
+        return None, err
+
+    async def _arm_breakeven(self, symbol: str, entry: "PivotEntry", pos: "PivotPosition") -> None:
+        try:
+            side = "SELL" if pos.direction == "LONG" else "BUY"
+            order_id, err = await self._place_stop_with_retry(symbol, side, entry.qty, entry.price)
+
+            if order_id is not None:
+                entry.sl_order_id = order_id
+                entry.be_armed = True
+                logger.info(f"[{KEO_PIVOT_NAME}] {symbol} entry@{entry.price:.4f} đạt +"
+                            f"{PIVOT_BE_ARM_ROI_PCT:.0f}% ROI -> đã đặt SL thật tại giá vào lệnh "
+                            f"(orderId={order_id})")
+            else:
+                logger.critical(f"[{KEO_PIVOT_NAME}] {symbol} ĐẶT SL THẬT THẤT BẠI SAU "
+                                 f"{PIVOT_CLOSE_MAX_ATTEMPTS} LẦN (entry@{entry.price:.4f}): {err}")
+
+            text = _build_pivot_be_arm_message(symbol, pos.direction, entry, order_id, err)
+            await _send_telegram_message(self.chat_id, text, f"PIVOT-{symbol}-BEARM")
+        except Exception as e:
+            logger.error(f"[{KEO_PIVOT_NAME}] {symbol} lỗi không mong đợi khi đặt SL: {e}", exc_info=True)
+        finally:
+            entry.be_pending = False
+
+    async def _check_breakeven(self, symbol: str, price: float) -> None:
+        if self.executor is None:
+            return
+        pos = self._position.get(symbol)
+        if pos is None:
+            return
+        for entry in list(pos.entries):
+            if entry.be_armed or entry.be_pending or entry.qty <= 0:
+                continue
+            if pos.direction == "LONG":
+                roi_pct = PIVOT_LEVERAGE * (price - entry.price) / entry.price * 100
+            else:
+                roi_pct = PIVOT_LEVERAGE * (entry.price - price) / entry.price * 100
+
+            if roi_pct >= PIVOT_BE_ARM_ROI_PCT:
+                entry.be_pending = True
+                asyncio.create_task(self._arm_breakeven(symbol, entry, pos))
+
+    async def check_stop_fills(self) -> None:
+        if self.executor is None:
+            return
+        for symbol, pos in list(self._position.items()):
+            for entry in list(pos.entries):
+                if entry.sl_order_id is None or entry.be_pending:
+                    continue
+                try:
+                    order = await self.executor.get_order_status(symbol, entry.sl_order_id)
+                except Exception as e:
+                    logger.error(f"[{KEO_PIVOT_NAME}] {symbol} lỗi kiểm tra SL orderId="
+                                 f"{entry.sl_order_id}: {e}")
+                    continue
+
+                status = order.get("status")
+                if status == "FILLED":
+                    fill_price = float(order.get("avgPrice") or 0) or entry.price
+                    pos.entries.remove(entry)
+                    logger.info(f"[{KEO_PIVOT_NAME}] {symbol} SL đã khớp tại {fill_price:.4f} "
+                                f"(entry@{entry.price:.4f}) — còn {len(pos.entries)} lệnh")
+                    text = _build_pivot_be_message(symbol, pos.direction, entry, fill_price,
+                                                    len(pos.entries), None)
+                    await _send_telegram_message(self.chat_id, text, f"PIVOT-{symbol}-BE")
+                    if not pos.entries:
+                        self._position.pop(symbol, None)
+                        if self.daily_stats is not None:
+                            self.daily_stats.record_result("TP")
+                elif status in ("CANCELED", "EXPIRED", "REJECTED"):
+                    logger.warning(f"[{KEO_PIVOT_NAME}] {symbol} lệnh SL orderId={entry.sl_order_id} "
+                                    f"bị {status}, gỡ theo dõi (entry@{entry.price:.4f} tạm thời "
+                                    f"KHÔNG có SL bảo vệ)")
+                    entry.sl_order_id = None
+                    entry.be_armed = False
 
     async def _open_or_dca(self, symbol: str, direction: Literal["LONG", "SHORT"], price: float,
                             bar_open: int | None) -> None:
@@ -1240,16 +1576,22 @@ class PivotDcaScanner:
         text = _build_pivot_open_message(symbol, pos, kind, order_err)
         await _send_telegram_message(self.chat_id, text, f"PIVOT-{symbol}-{direction}")
 
+    async def on_live_tick(self, symbol: str, candles: list[dict], live_candle: dict) -> None:
+        if symbol not in self.symbols:
+            return
+        await self._check_breakeven(symbol, live_candle["close"])
+
     async def on_closed_candle(self, symbol: str, candles: list[dict]) -> None:
         if symbol not in self.symbols:
             return
 
         c = candles[-1]
+        await self._check_breakeven(symbol, c["close"])
 
         needs_confirm = symbol in self.dca_confirm_symbols
 
         armed_long = self._armed_long.pop(symbol, None)
-        if armed_long is not None and c["low"] >= armed_long.low:
+        if armed_long is not None and c["close"] > c["open"] and c["close"] > armed_long.high:
             pos = self._position.get(symbol)
             if pos is None:
                 await self._open_or_dca(symbol, "LONG", c["close"], c.get("bar_open"))
@@ -1257,7 +1599,7 @@ class PivotDcaScanner:
                 await self._open_or_dca(symbol, "LONG", c["close"], c.get("bar_open"))
 
         armed_short = self._armed_short.pop(symbol, None)
-        if armed_short is not None and c["high"] <= armed_short.high:
+        if armed_short is not None and c["close"] < c["open"] and c["close"] < armed_short.low:
             pos = self._position.get(symbol)
             if pos is None:
                 await self._open_or_dca(symbol, "SHORT", c["close"], c.get("bar_open"))
@@ -1315,11 +1657,16 @@ def _banner() -> None:
                 f"bắn={LEGACY_RSI_LONG_CONFIRM}/{LEGACY_RSI_SHORT_CONFIRM} (intrabar)")
     logger.info(f"  {KEO_PIVOT_NAME:<22} -> chat_id={'CHƯA CẤU HÌNH' if not TELEGRAM_CHAT_ID_PIVOT else 'OK'}  "
                 f"length={PIVOT_LENGTH}  DCA tối đa={PIVOT_MAX_DCA} lần  coin={','.join(PIVOT_SYMBOLS)}  "
-                f"(không TP/SL, đóng theo tín hiệu đối nghịch)")
+                f"(không TP cố định, đóng theo tín hiệu đối nghịch; mỗi lệnh tự đặt SL thật tại "
+                f"entry khi đạt +{PIVOT_BE_ARM_ROI_PCT:.0f}% ROI)")
     if PIVOT_LIVE_TRADING and BINANCE_API_KEY and BINANCE_API_SECRET:
+        margin_desc = "  ·  ".join(f"{sym}={amt}u" for sym, amt in PIVOT_FIXED_MARGIN_USDT.items())
+        uncovered = [s for s in PIVOT_SYMBOLS if s not in PIVOT_FIXED_MARGIN_USDT]
+        if uncovered:
+            logger.critical(f"  ⚠️  {','.join(uncovered)} CHƯA có margin cố định trong "
+                             f"PIVOT_FIXED_MARGIN_USDT — coin này sẽ LỖI mỗi lần thử vào lệnh thật!")
         logger.warning(f"  ⚠️  ĐẶT LỆNH THẬT (MAINNET) ĐANG BẬT cho {KEO_PIVOT_NAME} — "
-                        f"x{PIVOT_LEVERAGE} đòn bẩy, {PIVOT_ACCOUNT_PCT*100:.1f}% tài khoản/vị thế, "
-                        f"{PIVOT_MARGIN_TYPE}")
+                        f"x{PIVOT_LEVERAGE} đòn bẩy, {PIVOT_MARGIN_TYPE}, margin: {margin_desc}")
         print("=" * 50)
         print(f"  ⚠️  CẢNH BÁO: ĐANG ĐẶT LỆNH THẬT BẰNG TIỀN THẬT (MAINNET) — x{PIVOT_LEVERAGE} đòn bẩy")
         print("=" * 50)
@@ -1404,6 +1751,65 @@ async def _periodic_time_sync(executor: "BinanceExecutor", interval_sec: int = 1
             logger.error(f"[Pivot Executor] Đồng bộ lại giờ thất bại (giữ nguyên lệch cũ): {e}")
 
 
+async def _periodic_be_stop_check(scanner: "PivotDcaScanner", interval_sec: int = 20) -> None:
+    while True:
+        await asyncio.sleep(interval_sec)
+        try:
+            await scanner.check_stop_fills()
+        except Exception as e:
+            logger.error(f"[Kiểm tra SL] Lỗi: {e}", exc_info=True)
+
+
+async def _periodic_position_reconcile(scanner: "PivotDcaScanner", executor: "BinanceExecutor",
+                                        chat_id: str, interval_sec: int = 180) -> None:
+    mismatch_signature: str | None = None
+    while True:
+        await asyncio.sleep(interval_sec)
+        try:
+            real_positions = await executor.get_all_positions()
+        except Exception as e:
+            logger.error(f"[Đối chiếu vị thế] Lỗi lấy positionRisk: {e}")
+            continue
+
+        tracked = scanner.snapshot_positions()
+        symbols = set(tracked) | {s for s in real_positions if s in scanner.symbols}
+        mismatches = []
+        for symbol in sorted(symbols):
+            bot_dir, bot_qty = tracked.get(symbol, (None, 0.0))
+            real_amt = real_positions.get(symbol, 0.0)
+            real_qty = abs(real_amt)
+            real_dir = "LONG" if real_amt > 0 else ("SHORT" if real_amt < 0 else None)
+
+            if bot_dir is None and real_dir is None:
+                continue
+            if bot_dir is None and real_dir is not None:
+                mismatches.append(f"{symbol}: bot tưởng FLAT nhưng sàn đang có {real_dir} {real_qty}")
+            elif bot_dir is not None and real_dir is None:
+                mismatches.append(f"{symbol}: bot theo dõi {bot_dir} {bot_qty} nhưng sàn ĐÃ FLAT")
+            elif bot_dir != real_dir:
+                mismatches.append(f"{symbol}: bot theo dõi {bot_dir} {bot_qty} nhưng sàn là {real_dir} {real_qty}")
+            else:
+                bigger = max(bot_qty, real_qty)
+                if bigger > 0 and abs(bot_qty - real_qty) / bigger > 0.05:
+                    mismatches.append(f"{symbol}: bot theo dõi {bot_dir} {bot_qty} nhưng sàn {real_dir} {real_qty} "
+                                       f"(lệch khối lượng)")
+
+        signature = "|".join(mismatches)
+        if mismatches:
+            if signature != mismatch_signature:
+                mismatch_signature = signature
+                text = ("*⚠️ LỆCH VỊ THẾ BOT vs SÀN — Pivot DCA Đảo Chiều*\n\n" +
+                        "\n".join(f"• {m}" for m in mismatches) +
+                        "\n\nCó thể có vị thế thật không được bot bảo vệ (không DCA/không BE/không đóng theo "
+                        "tín hiệu) — kiểm tra thủ công trên Binance.")
+                logger.critical(f"[Đối chiếu vị thế] {signature}")
+                await _send_telegram_message(chat_id, text, "PIVOT-RECONCILE")
+        elif mismatch_signature is not None:
+            mismatch_signature = None
+            await _send_telegram_message(chat_id, "✅ Vị thế bot và sàn đã khớp lại bình thường — Pivot DCA Đảo Chiều",
+                                          "PIVOT-RECONCILE-OK")
+
+
 async def _main() -> None:
     _banner()
     await _check_telegram_connections()
@@ -1440,7 +1846,6 @@ async def _main() -> None:
         if PIVOT_LIVE_TRADING and BINANCE_API_KEY and BINANCE_API_SECRET:
             candidate = BinanceExecutor(
                 BINANCE_API_KEY, BINANCE_API_SECRET, PIVOT_LEVERAGE, PIVOT_MARGIN_TYPE,
-                PIVOT_ACCOUNT_PCT, PIVOT_MAX_DCA + 1,
                 fixed_margin_usdt=PIVOT_FIXED_MARGIN_USDT,
             )
             try:
@@ -1455,7 +1860,7 @@ async def _main() -> None:
 
         pivot_scanner = PivotDcaScanner(
             PIVOT_SYMBOLS, TELEGRAM_CHAT_ID_PIVOT, daily_stats=pivot_stats, executor=pivot_executor,
-            dca_confirm_symbols=set(PIVOT_SYMBOLS_M5),
+            dca_confirm_symbols=set(PIVOT_SYMBOLS),
         )
 
         for sc in (long_scanner, short_scanner):
@@ -1467,10 +1872,14 @@ async def _main() -> None:
 
         feed_pivot_m5.on_closed_candle(pivot_scanner.on_closed_candle)
         feed_pivot_m15.on_closed_candle(pivot_scanner.on_closed_candle)
+        feed_pivot_m5.on_live_tick(pivot_scanner.on_live_tick)
+        feed_pivot_m15.on_live_tick(pivot_scanner.on_live_tick)
 
         stats_tasks = [daily_stats_scheduler([h1_stats, legacy_stats, pivot_stats])]
         if pivot_executor is not None:
             stats_tasks.append(_periodic_time_sync(pivot_executor))
+            stats_tasks.append(_periodic_position_reconcile(pivot_scanner, pivot_executor, TELEGRAM_CHAT_ID_PIVOT))
+            stats_tasks.append(_periodic_be_stop_check(pivot_scanner))
 
         await asyncio.gather(
             _run_forever("LiveFeed-H1", feed),
